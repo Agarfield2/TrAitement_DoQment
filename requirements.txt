@@ -1,0 +1,21 @@
+
+paddleocr>=2.7.0
+paddlepaddle>=2.5.0
+ 
+sentence-transformers>=2.7.0
+ 
+faiss-cpu>=1.8.0 #gpu ne fonctionne pas
+ 
+rank-bm25>=0.2.2
+ 
+langchain>=0.2.0
+langchain-community>=0.2.0
+ 
+numpy>=1.26.0
+pillow>=10.0.0
+pdf2image>=1.17.0
+tqdm>=4.66.0
+python-dotenv>=1.0.0
+ 
+nltk>=3.8.0
+scikit-learn>=1.4.0
