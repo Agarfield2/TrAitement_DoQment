@@ -1,0 +1,43 @@
+# TrAitement-DoQment — dependencies.
+#
+# Pipeline 1 (textual) and Pipeline 2 (multimodal) both use Ollama for
+# generation. No llama-cpp-python, no transformers-based LLM backend.
+
+# ── Pipeline 1 (canonical text pipeline, ingestion.py + pipeline1.py) ──
+faiss-cpu>=1.7.4
+numpy>=1.24
+Pillow>=10.0
+scikit-learn>=1.3
+sentence-transformers>=2.5
+torch>=2.5.0,<2.8.0
+torchvision
+tqdm>=4.66
+
+# PDF handling (used by both pipelines).
+pdf2image>=1.17.0
+PyMuPDF>=1.23.0,<1.25.0
+pdfplumber>=0.11.0
+pypdfium2>=4.20
+
+# Tesseract OCR (Pipeline 1 fallback + teammates' pdf_ocr.py & benchmark).
+pytesseract>=0.3.10
+opencv-python>=4.8.0,<4.10.0
+
+# Pipeline 2 — visual encoder.
+colpali-engine[interpretability]>=0.3.10
+
+# Pipeline 2 — multi-vector store (Qdrant local-path).
+qdrant-client>=1.12
+
+# Ollama client — used by BOTH pipelines (mistral text + qwen2.5vl vision).
+ollama>=0.4.0
+
+# CLI + rich output.
+typer>=0.12
+rich>=13.7
+
+# Streamlit UI.
+streamlit>=1.30
+
+# Tests.
+pytest>=8.0
