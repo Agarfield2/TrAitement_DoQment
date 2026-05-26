@@ -153,6 +153,7 @@ activemq-data/
 .venv
 env/
 venv_paddle/
+venv_pipline/
 venv/
 ENV/
 env.bak/
