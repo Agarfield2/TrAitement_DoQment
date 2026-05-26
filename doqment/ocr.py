@@ -25,6 +25,12 @@ def ocr_image(image, lang="fra+eng", preprocess=True):
     """
     Runs Tesseract OCR on a PIL image and returns ingestion.TextLine list.
 
+    The path to the `tesseract` binary is read from
+    `doqment.settings.Settings.tesseract_cmd`, defaulting to
+    `/usr/bin/tesseract`. Override either by editing settings.py or by
+    setting the `DOQMENT_TESSERACT_PATH` environment variable. No
+    auto-detection : the path is authoritative and explicit.
+
     Args:
         image (PIL.Image.Image): The image to OCR.
         lang (str): Tesseract language code(s), e.g. "fra+eng".
@@ -43,13 +49,8 @@ def ocr_image(image, lang="fra+eng", preprocess=True):
             "Install with :  pip install pytesseract"
         ) from exc
 
-    # Best-effort explicit location. If we find a binary, point
-    # pytesseract at it. Otherwise let pytesseract try its own default
-    # ("tesseract" via subprocess) — sometimes that resolves the binary
-    # in environments where our shutil.which probe does not.
-    binary = _find_tesseract_binary()
-    if binary is not None:
-        pytesseract.pytesseract.tesseract_cmd = binary
+    from doqment.settings import load_settings
+    pytesseract.pytesseract.tesseract_cmd = load_settings().tesseract_cmd
 
     chosen_lang = _pick_lang(pytesseract, lang)
     img = _preprocess(image) if preprocess else image.convert("RGB")
@@ -63,53 +64,14 @@ def ocr_image(image, lang="fra+eng", preprocess=True):
         )
     except pytesseract.TesseractNotFoundError as exc:
         raise RuntimeError(
-            "The `tesseract` binary could not be located. Install it "
-            "(e.g. `sudo dnf install tesseract` or `sudo apt install "
-            "tesseract-ocr tesseract-ocr-fra`). If it is installed but "
-            "the launching shell has a minimal PATH (some desktop apps "
-            "do this), set DOQMENT_TESSERACT_PATH to its absolute path "
-            "(`/usr/bin/tesseract` on Fedora and Debian)."
+            f"Tesseract binary not reachable at "
+            f"`{load_settings().tesseract_cmd}`. Either install it there "
+            f"(e.g. `sudo dnf install tesseract`), edit "
+            f"`doqment/settings.py` to point at the real location, or set "
+            f"DOQMENT_TESSERACT_PATH=/path/to/tesseract before launching."
         ) from exc
 
     return _group_into_lines(data)
-
-
-def _find_tesseract_binary():
-    """
-    Locates the `tesseract` executable.
-
-    Strategy : honour `DOQMENT_TESSERACT_PATH` if set ; otherwise try
-    `shutil.which` on PATH ; otherwise fall back to a small list of
-    common Unix install locations. This last step handles the case
-    where Streamlit was launched from a desktop terminal (Obsidian,
-    VS Code on some platforms, …) that ships with a minimal PATH not
-    including /usr/bin or /usr/local/bin.
-
-    Returns:
-        str | None: Absolute path to tesseract, or None if not found.
-    """
-
-    import os
-    import shutil
-
-    override = os.environ.get("DOQMENT_TESSERACT_PATH")
-    if override and os.path.isfile(override) and os.access(override, os.X_OK):
-        return override
-
-    binary = shutil.which("tesseract")
-    if binary:
-        return binary
-
-    fallbacks = [
-        "/usr/bin/tesseract",
-        "/usr/local/bin/tesseract",
-        "/opt/homebrew/bin/tesseract",
-        "/opt/local/bin/tesseract",
-    ]
-    for path in fallbacks:
-        if os.path.isfile(path) and os.access(path, os.X_OK):
-            return path
-    return None
 
 
 ### Helpers ###
@@ -125,9 +87,14 @@ def _preprocess(image):
         PIL.Image.Image: A binarised image ready for Tesseract.
     """
 
+    # cv2 can fail to import for several reasons : not installed at all,
+    # ABI mismatch with the system NumPy (e.g. cv2 compiled against
+    # NumPy 1 but NumPy 2 installed, which raises AttributeError instead
+    # of ImportError), or a broken shared library. In every case we'd
+    # rather skip preprocessing than fail the OCR entirely.
     try:
         import cv2
-    except ImportError:
+    except (ImportError, AttributeError):
         return image.convert("L")
 
     import numpy as np

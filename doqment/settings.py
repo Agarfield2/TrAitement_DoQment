@@ -54,8 +54,15 @@ class Settings:
     phase2_raw_dir: Path = _DATA / "raw"
 
     colqwen_model: str = os.environ.get("DOQMENT_COLQWEN_MODEL", "vidore/colqwen2-v1.0")
-    colqwen_device: str = os.environ.get("DOQMENT_COLQWEN_DEVICE", "cuda:0")
+    colqwen_device: str = os.environ.get("DOQMENT_COLQWEN_DEVICE", "cpu")
     colqwen_dtype: str = os.environ.get("DOQMENT_COLQWEN_DTYPE", "bfloat16")
+
+    # Tesseract binary — hardcoded to /usr/bin/tesseract because that's
+    # where Fedora, Debian and Ubuntu put it. Override via the env var
+    # DOQMENT_TESSERACT_PATH or by editing this line if your distro
+    # installs it elsewhere (Arch : same path ; macOS Homebrew :
+    # /opt/homebrew/bin/tesseract).
+    tesseract_cmd: str = os.environ.get("DOQMENT_TESSERACT_PATH", "/usr/bin/tesseract")
 
     retrieve_k: int = 10
     generate_k: int = 3

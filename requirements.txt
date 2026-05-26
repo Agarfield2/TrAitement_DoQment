@@ -21,7 +21,7 @@ pypdfium2>=4.20
 
 # Tesseract OCR (Pipeline 1 fallback + teammates' pdf_ocr.py & benchmark).
 pytesseract>=0.3.10
-opencv-python>=4.8.0,<4.10.0
+opencv-python>=4.10.0
 
 # Pipeline 2 — visual encoder.
 colpali-engine[interpretability]>=0.3.10

@@ -148,54 +148,16 @@ def test_missing_pytesseract_raises_clear_error(monkeypatch):
         ocr_image(_fake_image())
 
 
-def test_missing_tesseract_binary_raises_install_hint(monkeypatch):
+### Tests : Tesseract path comes from Settings ###
+
+def test_ocr_image_pushes_settings_path_to_pytesseract(monkeypatch):
     """
-    When neither our explicit location lookup nor pytesseract's own
-    default can find the binary, the user must get a clear install
-    message — not a stack trace from some downstream call.
-    """
-
-    import sys
-    import types
-    import doqment.ocr as ocr_mod
-
-    # Build a fake pytesseract that always raises TesseractNotFoundError,
-    # simulating the real-world case where neither shutil.which nor the
-    # subprocess-default lookup succeeds.
-    class _FakeTesseractNotFoundError(Exception):
-        pass
-
-    class _Output:
-        DICT = "dict"
-
-    def _raise_not_found(*a, **kw):
-        raise _FakeTesseractNotFoundError("not found")
-
-    fake_module = types.SimpleNamespace(
-        pytesseract=types.SimpleNamespace(tesseract_cmd="tesseract"),
-        Output=_Output,
-        TesseractNotFoundError=_FakeTesseractNotFoundError,
-        image_to_data=_raise_not_found,
-        get_languages=lambda: ["eng"],
-    )
-
-    monkeypatch.setitem(sys.modules, "pytesseract", fake_module)
-    monkeypatch.setattr(ocr_mod, "_find_tesseract_binary", lambda: None)
-
-    with pytest.raises(RuntimeError, match="could not be located"):
-        ocr_mod.ocr_image(_fake_image())
-
-
-def test_tesseract_works_when_only_pytesseract_default_finds_it(monkeypatch):
-    """
-    Even when our explicit lookup fails (returns None), pytesseract's
-    own default 'tesseract' lookup may still succeed. In that case
-    OCR should proceed normally — we don't pre-emptively crash.
+    The cmd path is read from Settings.tesseract_cmd and pushed into
+    pytesseract on every call. No auto-detection — explicit only.
     """
 
     import sys
     import types
-    import doqment.ocr as ocr_mod
 
     class _Output:
         DICT = "dict"
@@ -204,7 +166,7 @@ def test_tesseract_works_when_only_pytesseract_default_finds_it(monkeypatch):
         pass
 
     fake_module = types.SimpleNamespace(
-        pytesseract=types.SimpleNamespace(tesseract_cmd="tesseract"),
+        pytesseract=types.SimpleNamespace(tesseract_cmd="/initial/wrong/path"),
         Output=_Output,
         TesseractNotFoundError=_NotFound,
         image_to_data=lambda *a, **kw: {
@@ -215,93 +177,59 @@ def test_tesseract_works_when_only_pytesseract_default_finds_it(monkeypatch):
     )
 
     monkeypatch.setitem(sys.modules, "pytesseract", fake_module)
-    monkeypatch.setattr(ocr_mod, "_find_tesseract_binary", lambda: None)
 
-    # Must NOT raise — pytesseract.image_to_data succeeded.
-    result = ocr_mod.ocr_image(_fake_image(), preprocess=False)
-    assert result == []
+    # Inject a custom Settings.tesseract_cmd via load_settings patch.
+    from doqment import settings as settings_mod
+    base = settings_mod.Settings()
+    fake_settings = type(base)(
+        **{**base.__dict__, "tesseract_cmd": "/usr/bin/tesseract"}
+    ) if False else _make_settings_with(base, tesseract_cmd="/usr/bin/tesseract")
+    monkeypatch.setattr(settings_mod, "load_settings", lambda: fake_settings)
 
+    from doqment.ocr import ocr_image
+    ocr_image(_fake_image(), preprocess=False)
 
-def test_find_tesseract_respects_env_override(monkeypatch, tmp_path):
-    """DOQMENT_TESSERACT_PATH must win over PATH and fallbacks."""
-
-    import os
-    from doqment.ocr import _find_tesseract_binary
-
-    fake = tmp_path / "my-tesseract"
-    fake.write_text("#!/bin/sh\necho ok")
-    fake.chmod(0o755)
-
-    monkeypatch.setenv("DOQMENT_TESSERACT_PATH", str(fake))
-    assert _find_tesseract_binary() == str(fake)
+    assert fake_module.pytesseract.tesseract_cmd == "/usr/bin/tesseract"
 
 
-def test_find_tesseract_falls_back_to_known_paths(monkeypatch, tmp_path):
+def test_ocr_image_friendly_error_when_pytesseract_cannot_invoke(monkeypatch):
     """
-    If PATH doesn't include tesseract (minimal-env case — Obsidian
-    terminal, some desktop launchers), the known-locations fallback
-    must still find it.
-    """
-
-    import shutil
-    from doqment import ocr as ocr_mod
-
-    # Hide tesseract from PATH …
-    monkeypatch.setattr(shutil, "which", lambda name: None)
-    monkeypatch.delenv("DOQMENT_TESSERACT_PATH", raising=False)
-
-    # … but expose it at one of the known fallback paths.
-    fake = tmp_path / "tesseract"
-    fake.write_text("#!/bin/sh\necho ok")
-    fake.chmod(0o755)
-
-    real_isfile = __import__("os").path.isfile
-    real_access = __import__("os").access
-
-    def _fake_isfile(path):
-        if path == "/usr/bin/tesseract":
-            return True
-        return real_isfile(path)
-
-    def _fake_access(path, mode):
-        if path == "/usr/bin/tesseract":
-            return True
-        return real_access(path, mode)
-
-    monkeypatch.setattr("os.path.isfile", _fake_isfile)
-    monkeypatch.setattr("os.access", _fake_access)
-
-    assert ocr_mod._find_tesseract_binary() == "/usr/bin/tesseract"
-
-
-def test_tesseract_binary_path_propagated_to_pytesseract(monkeypatch):
-    """
-    When the binary is located, ocr_image must explicitly point
-    pytesseract at it (defensive against modules that set
-    pytesseract.tesseract_cmd to something else).
+    If pytesseract itself raises TesseractNotFoundError when running
+    the binary (e.g. the path in Settings is wrong), our wrapper
+    converts it into a RuntimeError that names the configured path.
     """
 
     import sys
     import types
 
+    class _NotFound(Exception):
+        pass
+
     class _Output:
         DICT = "dict"
 
     fake_module = types.SimpleNamespace(
-        pytesseract=types.SimpleNamespace(tesseract_cmd="/wrong/path"),
+        pytesseract=types.SimpleNamespace(tesseract_cmd=""),
         Output=_Output,
-        image_to_data=lambda *a, **kw: {
-            "text": [], "left": [], "top": [], "width": [], "height": [],
-            "conf": [], "block_num": [], "par_num": [], "line_num": [],
-        },
+        TesseractNotFoundError=_NotFound,
+        image_to_data=lambda *a, **kw: (_ for _ in ()).throw(_NotFound("nope")),
         get_languages=lambda: ["eng"],
     )
 
     monkeypatch.setitem(sys.modules, "pytesseract", fake_module)
-    from doqment import ocr as ocr_mod
-    monkeypatch.setattr(ocr_mod, "_find_tesseract_binary",
-                        lambda: "/usr/bin/tesseract")
 
-    ocr_mod.ocr_image(_fake_image(), preprocess=False)
+    from doqment import settings as settings_mod
+    base = settings_mod.Settings()
+    fake_settings = _make_settings_with(base, tesseract_cmd="/nowhere/tesseract")
+    monkeypatch.setattr(settings_mod, "load_settings", lambda: fake_settings)
 
-    assert fake_module.pytesseract.tesseract_cmd == "/usr/bin/tesseract"
+    from doqment.ocr import ocr_image
+    with pytest.raises(RuntimeError, match="/nowhere/tesseract"):
+        ocr_image(_fake_image(), preprocess=False)
+
+
+def _make_settings_with(base, **overrides):
+    """Helper : returns a Settings copy with the given field overrides."""
+
+    from dataclasses import replace
+    return replace(base, **overrides)
