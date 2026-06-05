@@ -33,20 +33,25 @@ htmlcov/
 .tox/
 
 # --- Données du projet (jamais versionnées) ---
+# Jeux de données importés manuellement (cf. README), jamais committés.
+data/SROIE-Dataset_v2/
+data/raw/
+
+# Artefacts générés à l'exécution (on garde le dossier, pas le contenu).
+data/processed/*            # index FAISS + métadonnées (Pipeline 1)
+!data/processed/.gitkeep
+data/qdrant/*               # base Qdrant local-path (Pipeline 2)
+!data/qdrant/.gitkeep
+data/eval/*                 # résultats d'évaluation OCR
+!data/eval/.gitkeep
+data/pages/                 # PNG de pages rasterisées (Pipeline 2)
+data/metadata.db            # SQLite des métadonnées (Pipeline 2)
+
+# Dossiers historiques (conservés vides pour compat, non utilisés par le code).
 data/corpus/*
 !data/corpus/.gitkeep
 data/index/*
 !data/index/.gitkeep
-data/eval/*
-!data/eval/.gitkeep
-data/processed/*
-!data/processed/.gitkeep
-data/faiss_index/*
-!data/faiss_index/.gitkeep
-data/qdrant/*
-!data/qdrant/.gitkeep
-data/SROIE2019/
-data/raw/
 
 # --- Poids de modèles téléchargés ---
 *.bin

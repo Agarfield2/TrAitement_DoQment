@@ -245,7 +245,7 @@ L'encodage est ~50× plus lent qu'avec GPU (compter ~30 s par page) — réalist
 
 ---
 
-## Trois fichiers canoniques cohabitent
+## Cinq fichiers canoniques cohabitent
 
 Les coéquipiers ont livré du code Python qu'on conserve **byte-identique aux originaux** :
 
