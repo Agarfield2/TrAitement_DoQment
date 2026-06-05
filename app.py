@@ -1,6 +1,9 @@
 """
-TrAitement-DoQment — UI
+TrAitement-DoQment — interface Streamlit.
 
+Expose les trois modes (doc, db, ingest) pour les deux pipelines via
+un sélecteur dans la barre latérale. Aucun appel réseau — tout tourne
+sur la machine locale.
 """
 
 import base64

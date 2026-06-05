@@ -46,7 +46,7 @@ ollama pull qwen2.5vl:7b           # ~5 Go, uniquement si Pipeline 2
 sudo dnf install tesseract tesseract-langpack-fra tesseract-langpack-eng
 # OU :  sudo apt install tesseract-ocr tesseract-ocr-fra tesseract-ocr-eng
 
-# 4. Tests (doivent afficher 63 passed).
+# 4. Tests (doivent afficher 61 passed).
 pytest
 
 # 5. Interface Streamlit.
@@ -165,7 +165,9 @@ python scripts/ocr_eval_batch.py \
 - `INCORRECT` — valeur extraite incorrecte
 - `NOT FOUND` — le modèle n'a pas trouvé l'information
 
+---
 
+## Configuration
 
 Tout vit dans `doqment/settings.py` — une seule dataclass `Settings` avec des défauts sensés. Pour surcharger sans toucher au code, exporter des variables d'environnement :
 
@@ -182,7 +184,7 @@ export DOQMENT_COLQWEN_DTYPE=bfloat16
 ## Structure du dépôt
 
 ```
-TrAitementDoQment/
+TrAitement-DoQment/
 ├── ingestion.py               ← canonique coéquipier 1 (intouché)
 ├── pipeline1.py               ← canonique coéquipier 1 (intouché)
 ├── pipeline_rag2.py           ← canonique coéquipier 2 (intouché)
@@ -206,7 +208,7 @@ TrAitementDoQment/
 │   ├── phase1.py              ← CLI Pipeline 1
 │   └── phase2.py              ← CLI Pipeline 2
 │
-├── tests/                     ← 63 tests utiles, exécutés en <3 secondes
+├── tests/                     ← 61 tests utiles, exécutés en <3 secondes
 │   ├── test_settings.py
 │   ├── test_llm.py            ← parsing JSON du VLM, validation citations
 │   ├── test_ocr.py            ← groupement mots→lignes Tesseract
@@ -230,7 +232,7 @@ TrAitementDoQment/
 
 **`Could not load library with AVX2 support` (FAISS)** — Le fallback générique s'active. Fonctionnel, performance légèrement plus basse.
 
-**`AttributeError: 'OCREngine' object has no attribute '_model'`** — Bug du fichier canonique `ingestion.py:82-99`. Le mode `doc` Pipeline 1 contourne automatiquement en passant par `doqment/ocr.py` (Tesseract). Si vous voyez l'erreur, c'est que vous tournez une version antérieure — `pytest` doit afficher 62 passed.
+**`AttributeError: 'OCREngine' object has no attribute '_model'`** — Bug du fichier canonique `ingestion.py:82-99`. Le mode `doc` Pipeline 1 contourne automatiquement en passant par `doqment/ocr.py` (Tesseract). Si vous voyez l'erreur, c'est que vous tournez une version antérieure — `pytest` doit afficher 61 passed.
 
 **`ResponseError: model requires more system memory (12.5 GiB) than is available (...)`** — Qwen2.5-VL 7B requiert ~12,5 Go de RAM en CPU-only (~5 Go en GPU CUDA). Libérer de la RAM (fermer le navigateur, IDE, etc.) ou exécuter sur une machine équipée. Le projet est figé sur ce modèle ; ne pas le remplacer.
 
