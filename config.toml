@@ -1,0 +1,27 @@
+# Streamlit light + dark themes for TrAitement-DoQment.
+#
+# Defining BOTH themes here lets Streamlit paint the page, widget and text
+# colors itself for whichever theme is active — whether it was chosen via the
+# OS preference or the in-app "⋮ → Settings" toggle. The custom CSS in app.py
+# therefore no longer hardcodes (and can no longer break) those surfaces when
+# the user switches modes.
+#
+# [theme.light] is tuned to match the previous, validated light appearance
+# exactly (page #F8FAFC, white widget surfaces, slate text).
+
+[theme]
+font = "sans-serif"
+primaryColor = "#1565C0"
+
+[theme.light]
+backgroundColor = "#F8FAFC"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#0F172A"
+borderColor = "#E2E8F0"
+
+[theme.dark]
+backgroundColor = "#0E1117"
+secondaryBackgroundColor = "#1B1F27"
+textColor = "#E6EAF0"
+borderColor = "#2C313C"
+primaryColor = "#1976D2"

@@ -66,19 +66,17 @@ def _inject_css() -> None:
             --green:       #2E7D32;
             --green-mid:   #388E3C;
             --green-light: #E8F5E9;
-            --white:       #FFFFFF;
-            --bg:          #F8FAFC;
-            --border:      #E2E8F0;
-            --text:        #0F172A;
-            --muted:       #64748B;
+            /* Theme-neutral tokens: legible on both light and dark surfaces.
+               Page / widget backgrounds and body text are painted by the
+               active Streamlit theme (see .streamlit/config.toml), so they are
+               intentionally NOT hardcoded here anymore. */
+            --border:      rgba(120,130,150,0.28);
+            --muted:       #7C8798;
             --radius:      14px;
             --radius-sm:   8px;
         }}
 
-        /* App background ────────────────────────────────*/
-        .stApp {{
-            background: var(--bg) !important;
-        }}
+        /* App background is painted by the active Streamlit theme. */
 
         /* Sidebar ───────────────────────────────────────*/
         [data-testid="stSidebar"] {{
@@ -140,14 +138,12 @@ def _inject_css() -> None:
             font-family: 'Syne', sans-serif !important;
             font-size: 1.75rem !important;
             font-weight: 700 !important;
-            color: var(--text) !important;
             letter-spacing: -0.02em;
         }}
         h2 {{
             font-family: 'Syne', sans-serif !important;
             font-size: 1.15rem !important;
             font-weight: 700 !important;
-            color: var(--text) !important;
         }}
         h3 {{
             font-size: 0.9rem !important;
@@ -181,7 +177,6 @@ def _inject_css() -> None:
 
         /* File uploader ─────────────────────────────────*/
         [data-testid="stFileUploader"] {{
-            background: var(--white) !important;
             border: 2px dashed var(--border) !important;
             border-radius: var(--radius) !important;
             padding: 1.5rem !important;
@@ -189,18 +184,16 @@ def _inject_css() -> None:
         }}
         [data-testid="stFileUploader"]:hover {{
             border-color: var(--blue-mid) !important;
-            background: var(--blue-light) !important;
+            background: rgba(21,101,192,0.08) !important;
         }}
 
         /* Text inputs / text areas ──────────────────────*/
         .stTextArea textarea,
         .stTextInput input {{
-            background: var(--white) !important;
             border: 1.5px solid var(--border) !important;
             border-radius: 10px !important;
             font-family: 'DM Sans', sans-serif !important;
             font-size: 14px !important;
-            color: var(--text) !important;
             transition: border-color 0.18s ease !important;
         }}
         .stTextArea textarea:focus,
@@ -213,7 +206,6 @@ def _inject_css() -> None:
         .stSelectbox > div > div {{
             border-radius: 10px !important;
             border: 1.5px solid var(--border) !important;
-            background: var(--white) !important;
             font-size: 13px !important;
         }}
 
@@ -221,8 +213,6 @@ def _inject_css() -> None:
         .stExpander {{
             border: 1px solid var(--border) !important;
             border-radius: var(--radius) !important;
-            background: var(--white) !important;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.04) !important;
         }}
 
         /* Info / success / warning boxes ────────────────*/
@@ -250,9 +240,9 @@ def _inject_css() -> None:
             display: inline-flex;
             align-items: center;
             gap: 6px;
-            background: var(--blue-light);
-            color: var(--blue);
-            border: 1px solid rgba(21,101,192,0.18);
+            background: rgba(21,101,192,0.14);
+            color: #3B82F6;
+            border: 1px solid rgba(59,130,246,0.30);
             font-size: 11px;
             font-weight: 600;
             padding: 4px 12px;
@@ -260,9 +250,9 @@ def _inject_css() -> None:
             letter-spacing: 0.03em;
         }}
         .tdq-badge.green {{
-            background: var(--green-light);
-            color: var(--green);
-            border-color: rgba(46,125,50,0.18);
+            background: rgba(46,125,50,0.16);
+            color: #4CAF50;
+            border-color: rgba(76,175,80,0.30);
         }}
         .tdq-badge-dot {{
             width: 7px; height: 7px;
@@ -276,7 +266,7 @@ def _inject_css() -> None:
 
         /* Answer block ──────────────────────────────────*/
         .tdq-answer {{
-            background: var(--white);
+            background: rgba(127,127,140,0.06);
             border-left: 3px solid var(--green-mid);
             border-top: 1px solid var(--border);
             border-right: 1px solid var(--border);
@@ -284,7 +274,6 @@ def _inject_css() -> None:
             border-radius: 0 var(--radius) var(--radius) 0;
             padding: 1.2rem 1.4rem;
             margin-top: 1rem;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.04);
             animation: tdqFadeUp 0.4s ease both;
         }}
         .tdq-answer-label {{
@@ -292,17 +281,16 @@ def _inject_css() -> None:
             font-weight: 600;
             text-transform: uppercase;
             letter-spacing: 0.1em;
-            color: var(--green);
+            color: #4CAF50;
             margin-bottom: 8px;
         }}
 
         /* Cards ─────────────────────────────────────────*/
         .tdq-card {{
-            background: var(--white);
+            background: rgba(127,127,140,0.06);
             border: 1px solid var(--border);
             border-radius: var(--radius);
             padding: 1.2rem 1.4rem;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.04);
             margin-bottom: 1rem;
         }}
 

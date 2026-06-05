@@ -36,8 +36,9 @@ ollama>=0.4.0
 typer>=0.12
 rich>=13.7
 
-# Streamlit UI.
-streamlit>=1.30
+# Streamlit UI. 1.46 added per-mode [theme.light]/[theme.dark] config tables,
+# used in .streamlit/config.toml so surfaces follow the active light/dark theme.
+streamlit>=1.46
 
 # Tests.
 pytest>=8.0
