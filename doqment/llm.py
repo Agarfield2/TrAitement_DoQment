@@ -22,15 +22,33 @@ logger = logging.getLogger(__name__)
 ### Vision generation knobs ###
 #
 # These guard Qwen2.5-VL against the repetition-collapse failure on dense
-# document pages (endless `<|im_start|>`). `num_ctx` must be large enough to
-# hold the system prompt, the question and `generate_k` downscaled pages
-# without truncation ; `num_predict` bounds runaway generation ; the repeat
-# penalty breaks any loop that still starts.
+# document pages (endless `<|im_start|>`). The collapse is triggered by the
+# prompt overflowing `num_ctx` : page images cost ~1.3k vision tokens each,
+# so a fixed context silently truncates as soon as `generate_k` grows. We
+# therefore size `num_ctx` from the number of pages, capped to protect VRAM.
+# `num_predict` bounds runaway generation ; the repeat penalty breaks any
+# loop that still starts.
 
-_VLM_NUM_CTX = 8192
+_VLM_CTX_BASE = 1024        # headroom for system prompt + question + answer
+_VLM_CTX_PER_PAGE = 1400    # ~Qwen2.5-VL vision tokens for one downscaled page
+_VLM_CTX_CAP = 16384        # hard ceiling (16 GB VRAM budget)
 _VLM_NUM_PREDICT = 1024
 _VLM_REPEAT_PENALTY = 1.1
 _VLM_MAX_IMAGE_EDGE = 1568
+
+
+def _ctx_for_pages(n_pages):
+    """
+    Computes a context window large enough to hold `n_pages` page images.
+
+    Args:
+        n_pages (int): Number of images sent to the VLM (generate_k).
+
+    Returns:
+        int: A num_ctx value, capped at `_VLM_CTX_CAP`.
+    """
+
+    return min(_VLM_CTX_CAP, _VLM_CTX_BASE + n_pages * _VLM_CTX_PER_PAGE)
 
 
 ### Public API ###
@@ -118,7 +136,7 @@ def generate_vision(prompt, images, *, model, host, keep_alive="5m"):
         format="json",
         options={
             "temperature": 0.0,
-            "num_ctx": _VLM_NUM_CTX,
+            "num_ctx": _ctx_for_pages(len(images)),
             "num_predict": _VLM_NUM_PREDICT,
             "repeat_penalty": _VLM_REPEAT_PENALTY,
         },

@@ -105,6 +105,23 @@ def test_image_to_b64_keeps_small_pages_untouched():
     assert Image.open(io.BytesIO(decoded)).size == (800, 600)
 
 
+### Tests : adaptive context sizing ###
+
+def test_ctx_scales_with_page_count():
+    """More pages must request a larger context window."""
+    assert llm._ctx_for_pages(3) < llm._ctx_for_pages(10)
+
+
+def test_ctx_fits_three_pages():
+    """The default generate_k must fit comfortably below the cap."""
+    assert llm._ctx_for_pages(3) <= llm._VLM_CTX_CAP
+
+
+def test_ctx_is_capped():
+    """An absurd page count is clamped to the VRAM ceiling."""
+    assert llm._ctx_for_pages(1000) == llm._VLM_CTX_CAP
+
+
 ### Tests : missing dependency ###
 
 def test_client_raises_clear_error_when_ollama_missing(monkeypatch):
