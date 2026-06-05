@@ -96,7 +96,7 @@ def _render_phase2():
         "+ SQLite. Idempotent via MD5 — already-indexed files are skipped."
     )
 
-    src_dir = st.text_input("Source directory", value="data/raw")
+    src_dir = st.text_input("Source directory", value="data/SROIE-Dataset_v2")
 
     if not st.button("🚀 Build the Phase 2 index", type="primary"):
         return

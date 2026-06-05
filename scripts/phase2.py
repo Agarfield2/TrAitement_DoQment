@@ -29,7 +29,7 @@ console = Console()
 
 @app.command()
 def ingest(
-    dir: str = typer.Option("data/raw", help="Folder of PDFs / images to index."),
+    dir: str = typer.Option("data/SROIE-Dataset_v2", help="Folder of PDFs / images to index."),
 ):
     """
     Indexes a folder into the persistent Qdrant database.
