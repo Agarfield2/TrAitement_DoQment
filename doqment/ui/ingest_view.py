@@ -41,7 +41,7 @@ def _render_phase1():
 
     root = st.text_input(
         "Folder to ingest (subfolders included)",
-        value="data/SROIE2019",
+        value="data/SROIE-Dataset_v2",
     )
 
     with st.expander("Advanced options"):

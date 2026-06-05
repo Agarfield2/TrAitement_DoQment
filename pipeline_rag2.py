@@ -83,52 +83,97 @@ class Passage:
 
 
 
-# ETAPE 1 - PaddleOCR
+# ETAPE 1 - OCR (Tesseract)
 
 
-class PaddleOCREngine:
-    
+class TesseractOCREngine:
+    """OCR engine basé sur Tesseract — remplace PaddleOCR (incompatible Python ≥ 3.10+).
 
-    def __init__(self, lang: str = "en", use_gpu: bool = False):
+    Utilise le chemin Tesseract défini par la variable d'environnement
+    ``DOQMENT_TESSERACT_PATH`` (défaut : ``/usr/bin/tesseract``).
+    """
+
+    LOW_CONTRAST_RMS = 20.0
+
+    def __init__(self, lang: str = "fra+eng", use_gpu: bool = False):
+        # use_gpu conservé pour compatibilité d'interface — Tesseract est CPU-only.
         self.lang = lang
-        self.use_gpu = use_gpu
-        self._ocr = None
+        import os
+        import pytesseract
+        pytesseract.pytesseract.tesseract_cmd = os.environ.get(
+            "DOQMENT_TESSERACT_PATH", "/usr/bin/tesseract"
+        )
+        self._pytesseract = pytesseract
 
-    def _load(self):
-        if self._ocr is None:
-            try:
-                from paddleocr import PaddleOCR
-            except ImportError:
-                raise ImportError("pip install paddlepaddle paddleocr")
-
-            # Supprimer les logs DEBUG/WARNING de PaddlePaddle
-            import logging
-            logging.getLogger("ppocr").setLevel(logging.ERROR)
-
-            print("  [OCR] Chargement PaddleOCR...")
-            self._ocr = PaddleOCR(
-                use_textline_orientation=True,
-                lang=self.lang,
-                show_log=False,
-                use_gpu=self.use_gpu,
-            )
-            print("  [OCR] PaddleOCR pret")
+    def _preprocess(self, img: Image.Image) -> Image.Image:
+        """Contrast adaptatif → seuillage → dilatation."""
+        try:
+            import cv2
+        except (ImportError, AttributeError):
+            return img.convert("L")
+        arr = np.array(img.convert("L"), dtype=float)
+        if float(arr.std()) < self.LOW_CONTRAST_RMS:
+            import cv2 as _cv2
+            bgr = _cv2.cvtColor(np.array(img.convert("RGB")), _cv2.COLOR_RGB2BGR)
+            bgr = _cv2.convertScaleAbs(bgr, alpha=1.5, beta=0)
+            img = Image.fromarray(_cv2.cvtColor(bgr, _cv2.COLOR_BGR2RGB))
+        arr8 = np.array(img.convert("L"))
+        binary = cv2.adaptiveThreshold(
+            arr8, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 10
+        )
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 1))
+        return Image.fromarray(cv2.dilate(binary, kernel, iterations=1))
 
     def run(self, img: Image.Image) -> list[TextLine]:
-        
-        self._load()
-        result = self._ocr.ocr(np.array(img), cls=False)
+        processed = self._preprocess(img)
+        try:
+            available = self._pytesseract.get_languages()
+            parts = [p for p in self.lang.split("+") if p in available]
+            lang = "+".join(parts) if parts else (available[0] if available else "eng")
+        except Exception:
+            lang = self.lang
+
+        data = self._pytesseract.image_to_data(
+            processed, lang=lang,
+            config="--oem 3 --psm 3",
+            output_type=self._pytesseract.Output.DICT,
+        )
+        by_line: dict = {}
+        for i in range(len(data["text"])):
+            text = data["text"][i].strip()
+            if not text:
+                continue
+            key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
+            by_line.setdefault(key, []).append(i)
+
         lines: list[TextLine] = []
-        if result and result[0]:
-            for item in result[0]:
-                pts, (text, conf) = item
-                bbox = BoundingBox(
-                    x1=pts[0][0], y1=pts[0][1],
-                    x2=pts[1][0], y2=pts[1][1],
-                    x3=pts[2][0], y3=pts[2][1],
-                    x4=pts[3][0], y4=pts[3][1],
-                )
-                lines.append(TextLine(text=text, bbox=bbox, confidence=float(conf)))
+        for key in sorted(by_line.keys()):
+            idxs = by_line[key]
+            words = [data["text"][i].strip() for i in idxs]
+            text = " ".join(w for w in words if w)
+            if not text:
+                continue
+            xs = [int(data["left"][i]) for i in idxs]
+            ys = [int(data["top"][i]) for i in idxs]
+            rs = [int(data["left"][i]) + int(data["width"][i]) for i in idxs]
+            bs = [int(data["top"][i]) + int(data["height"][i]) for i in idxs]
+            x1, y1, x2, y2 = min(xs), min(ys), max(rs), max(bs)
+            confs = []
+            for i in idxs:
+                try:
+                    c = float(data["conf"][i])
+                    if c >= 0:
+                        confs.append(c / 100.0)
+                except (TypeError, ValueError):
+                    pass
+            avg_conf = sum(confs) / len(confs) if confs else 0.0
+            bbox = BoundingBox(
+                x1=float(x1), y1=float(y1),
+                x2=float(x2), y2=float(y1),
+                x3=float(x2), y3=float(y2),
+                x4=float(x1), y4=float(y2),
+            )
+            lines.append(TextLine(text=text, bbox=bbox, confidence=avg_conf))
         return lines
 
     @staticmethod
@@ -459,7 +504,7 @@ class RAGPipeline:
         n_gpu_layers: int = 0,
     ):
         self.index_dir = Path(index_dir)
-        self.ocr = PaddleOCREngine(lang=ocr_lang, use_gpu=use_gpu_ocr)
+        self.ocr = TesseractOCREngine(lang=ocr_lang, use_gpu=use_gpu_ocr)
         self.embedder = EmbeddingModel(embed_model)
         self.faiss = FAISSIndex()
         self.llm = MistralLLM(llm_path, n_gpu_layers=n_gpu_layers) if llm_path else None
@@ -486,7 +531,7 @@ class RAGPipeline:
         print(f"\n{'='*60}")
         print(f"  INGESTION - {len(files)} document(s)")
         print(f"  Source      : {docs_dir}")
-        print(f"  Annotations : {annot_dir or 'PaddleOCR direct'}")
+        print(f"  Annotations : {annot_dir or 'Tesseract direct'}")
         print(f"{'='*60}")
 
         all_passages: list[Passage] = []
@@ -496,7 +541,7 @@ class RAGPipeline:
 
             # Annotations SROIE disponibles -> pas besoin d'OCR
             if ann_path and ann_path.exists():
-                lines = PaddleOCREngine.from_sroie_annotation(ann_path)
+                lines = TesseractOCREngine.from_sroie_annotation(ann_path)
             else:
                 # PaddleOCR sur l'image (ou chaque page du PDF)
                 images = load_image_or_pdf(img_path)
@@ -582,7 +627,7 @@ class RAGPipeline:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Pipeline RAG : PaddleOCR -> FAISS -> Mistral-7B (100% local)",
+        description="Pipeline RAG : Tesseract -> FAISS -> Mistral-7B (100% local)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -592,8 +637,8 @@ def build_parser() -> argparse.ArgumentParser:
     pi.add_argument("--docs",     required=True,            help="Dossier images/PDFs")
     pi.add_argument("--annot",    default=None,             help="Dossier annotations SROIE (optionnel)")
     pi.add_argument("--index",    default="data/faiss_index")
-    pi.add_argument("--lang",     default="en",             help="Langue PaddleOCR (en, fr, ...)")
-    pi.add_argument("--gpu-ocr",  action="store_true",      help="GPU pour PaddleOCR")
+    pi.add_argument("--lang",     default="fra+eng",         help="Langue Tesseract (fra+eng, eng, ...)")
+    pi.add_argument("--gpu-ocr",  action="store_true",      help="Ignoré (Tesseract est CPU-only)")
     pi.add_argument("--max-docs", type=int, default=None)
 
     # query

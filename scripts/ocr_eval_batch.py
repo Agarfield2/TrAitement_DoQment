@@ -1,35 +1,49 @@
 """
-Batch OCR evaluation with Tesseract + Ollama LLM judge.
+Évaluation par lot sur SROIE-Dataset_v2 — Phase 1 (Tesseract + LLM texte)
+                                          et Phase 2 (Qwen2.5-VL vision).
 
-Combines the metric-based evaluation (CER/WER/F1) from Comparaison_OCR.py
-with the LLM extraction + judgment pipeline from ocr_llm_eval_batch.py.
-Tesseract only — PaddleOCR dropped (Python 3.14 incompatibility).
+Structure attendue du dataset :
+  <dataset>/
+  ├── test/
+  │   ├── img/        ← images .jpg / .png des reçus
+  │   ├── box/        ← annotations ICDAR (x1,y1,...,x4,y4,texte)
+  │   └── entities/   ← JSON ground-truth {company, date, address, total}
+  └── train/          ← même structure (optionnel)
 
-USAGE
-  # Basic run (metrics only, no LLM judge) :
+Pour chaque reçu on pose trois questions au modèle :
+  1. Nom de la companie (company)
+  2. Montant total (total)
+  3. Date (date)
+
+Puis on compare la réponse extraite à la ground-truth et on compte
+le nombre de reçus dont on a réussi à extraire correctement les 3 champs.
+
+USAGE — Phase 1 (Tesseract OCR → Mistral texte) :
   python scripts/ocr_eval_batch.py \\
-      --docs  data/SROIE2019/0325updated.task2train(626p) \\
-      --out   data/eval/results.json
+      --pipeline phase1 \\
+      --dataset  data/SROIE-Dataset_v2 \\
+      --split    test \\
+      --out      data/eval/results_phase1.json
 
-  # With LLM judge (requires Ollama + mistral:7b-instruct running) :
+USAGE — Phase 2 (image → Qwen2.5-VL vision, pas de Tesseract) :
   python scripts/ocr_eval_batch.py \\
-      --docs  data/SROIE2019/0325updated.task2train(626p) \\
-      --out   data/eval/results.json \\
-      --llm-judge
+      --pipeline phase2 \\
+      --dataset  data/SROIE-Dataset_v2 \\
+      --split    test \\
+      --out      data/eval/results_phase2.json
 
-  # Quick sample :
-  python scripts/ocr_eval_batch.py \\
-      --docs data/SROIE2019/0325updated.task2train(626p) \\
-      --max-docs 10 --llm-judge
-
-  # Disable contrast enhancement :
-  python scripts/ocr_eval_batch.py --docs ... --no-enhance
-
-  # Custom contrast :
-  python scripts/ocr_eval_batch.py --docs ... --alpha 2.0 --beta 10
+Options communes :
+  --max-docs N          Limiter à N reçus
+  --enhance auto|on|off Filtre contraste Tesseract (Phase 1 uniquement)
+  --use-box-annotations Utiliser box/ au lieu de Tesseract (Phase 1 uniquement)
+  --ollama-host URL     Hôte Ollama (défaut: DOQMENT_OLLAMA_HOST ou localhost:11434)
+  --ollama-model TAG    Modèle texte Phase 1 (défaut: DOQMENT_OLLAMA_TEXT_MODEL)
+  --vision-model TAG    Modèle vision Phase 2 (défaut: DOQMENT_OLLAMA_VISION_MODEL)
 """
 
 import argparse
+import base64
+import io
 import json
 import os
 import re
@@ -46,7 +60,7 @@ pytesseract.pytesseract.tesseract_cmd = os.environ.get(
     "DOQMENT_TESSERACT_PATH", "/usr/bin/tesseract"
 )
 
-# ── ANSI colours ─────────────────────────────────────────────────────────────
+# ── ANSI couleurs ─────────────────────────────────────────────────────────────
 
 COLORS = {
     "CORRECT":   "\033[92m",
@@ -61,54 +75,46 @@ def color(text: str, verdict: str) -> str:
     return f"{COLORS.get(verdict, '')}{text}{RESET}"
 
 
-# ── Image loading ─────────────────────────────────────────────────────────────
+# ── Chargement image ──────────────────────────────────────────────────────────
 
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".pdf"}
 
 
 def load_image(path: Path, dpi: int = 300) -> Image.Image:
     if path.suffix.lower() == ".pdf":
-        doc  = fitz.open(str(path))
+        doc = fitz.open(str(path))
         zoom = dpi / 72
-        pix  = doc[0].get_pixmap(matrix=fitz.Matrix(zoom, zoom))
-        img  = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        pix = doc[0].get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
         doc.close()
         return img
     return Image.open(str(path)).convert("RGB")
 
 
-# ── Preprocessing ─────────────────────────────────────────────────────────────
+# ── Pré-traitement (Phase 1) ──────────────────────────────────────────────────
 
 LOW_CONTRAST_RMS = 20.0
 
 
 def needs_contrast_boost(img: Image.Image,
                          threshold: float = LOW_CONTRAST_RMS) -> bool:
-    """True if grayscale RMS std-dev < threshold (faded / low-contrast doc)."""
     arr = np.array(img.convert("L"), dtype=float)
     return float(arr.std()) < threshold
 
 
 def enhance_contrast(img: Image.Image, alpha: float = 1.5,
                      beta: int = 0) -> Image.Image:
-    """Linear contrast boost (cv2.convertScaleAbs)."""
     try:
         import cv2
     except (ImportError, AttributeError):
         return img
-    img_np  = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
-    out     = cv2.convertScaleAbs(img_np, alpha=alpha, beta=beta)
+    img_np = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
+    out = cv2.convertScaleAbs(img_np, alpha=alpha, beta=beta)
     return Image.fromarray(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
 
 
 def preprocess(img: Image.Image, enhance="auto",
                alpha: float = 1.5, beta: int = 0) -> Image.Image:
-    """Contrast (adaptive) → adaptive threshold → dilate.
-
-    enhance="auto"  apply only if needs_contrast_boost().
-    enhance=True    always apply.
-    enhance=False   never apply.
-    """
     try:
         import cv2
     except (ImportError, AttributeError):
@@ -116,7 +122,7 @@ def preprocess(img: Image.Image, enhance="auto",
     do_enhance = needs_contrast_boost(img) if enhance == "auto" else bool(enhance)
     if do_enhance:
         img = enhance_contrast(img, alpha=alpha, beta=beta)
-    arr    = np.array(img.convert("L"))
+    arr = np.array(img.convert("L"))
     binary = cv2.adaptiveThreshold(
         arr, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 10,
     )
@@ -124,14 +130,20 @@ def preprocess(img: Image.Image, enhance="auto",
     return Image.fromarray(cv2.dilate(binary, kernel, iterations=1))
 
 
-# ── OCR ───────────────────────────────────────────────────────────────────────
+# ── OCR Tesseract (Phase 1) ───────────────────────────────────────────────────
 
-def run_ocr(img: Image.Image, lang: str, enhance="auto",
-            alpha: float = 1.5, beta: int = 0) -> str:
-    """Returns OCR text as a single string."""
+def run_tesseract(img: Image.Image, lang: str, enhance="auto",
+                  alpha: float = 1.5, beta: int = 0) -> str:
+    """Retourne le texte OCR Tesseract sous forme de chaîne."""
     processed = preprocess(img, enhance=enhance, alpha=alpha, beta=beta)
+    try:
+        available = pytesseract.get_languages()
+        parts = [p for p in lang.split("+") if p in available]
+        chosen = "+".join(parts) if parts else (available[0] if available else "eng")
+    except Exception:
+        chosen = lang
     data = pytesseract.image_to_data(
-        processed, lang=lang,
+        processed, lang=chosen,
         config="--oem 3 --psm 3",
         output_type=pytesseract.Output.DICT,
     )
@@ -140,7 +152,22 @@ def run_ocr(img: Image.Image, lang: str, enhance="auto",
     return "\n".join(words)
 
 
-# ── Metrics ───────────────────────────────────────────────────────────────────
+def read_box_annotation(box_path: Path) -> str:
+    """Lit un fichier box/ ICDAR et retourne le texte ligne par ligne."""
+    lines = []
+    with open(box_path, encoding="utf-8", errors="replace") as f:
+        for raw in f:
+            raw = raw.strip()
+            if not raw:
+                continue
+            parts = raw.split(",", 8)
+            text = parts[8].strip() if len(parts) >= 9 else raw
+            if text:
+                lines.append(text)
+    return "\n".join(lines)
+
+
+# ── Métriques textuelles ──────────────────────────────────────────────────────
 
 def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text.lower()).strip()
@@ -156,58 +183,10 @@ def edit_distance(a, b) -> int:
     return dp[-1]
 
 
-def cer(ref, hyp) -> float:
-    r, h = normalize(ref), normalize(hyp)
-    return 0.0 if not r else min(edit_distance(r, h) / len(r), 1.0)
+# ── Prompts Ollama ────────────────────────────────────────────────────────────
 
-
-def wer(ref, hyp) -> float:
-    rw, hw = normalize(ref).split(), normalize(hyp).split()
-    return 0.0 if not rw else min(edit_distance(rw, hw) / len(rw), 1.0)
-
-
-def prf(ref, hyp):
-    rw, hw = set(normalize(ref).split()), set(normalize(hyp).split())
-    if not hw:
-        return 0.0, 0.0, 0.0
-    tp = len(rw & hw)
-    p  = tp / len(hw)
-    r  = tp / len(rw) if rw else 0.0
-    f1 = (2 * p * r / (p + r)) if (p + r) else 0.0
-    return p, r, f1
-
-
-def similarity(ref, hyp) -> float:
-    return SequenceMatcher(None, normalize(ref), normalize(hyp)).ratio()
-
-
-# ── Reference parsers ─────────────────────────────────────────────────────────
-
-def parse_sroie_txt(ref_path: Path) -> str:
-    """SROIE task-1 format : 8 bbox coords + text."""
-    lines = []
-    with open(ref_path, encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split(",")
-            text  = ",".join(parts[8:]) if len(parts) >= 9 else line
-            if text:
-                lines.append(text)
-    return "\n".join(lines)
-
-
-def parse_json_ref(ref_path: Path) -> dict:
-    """SROIE task-2 JSON format : {company, date, address, total}."""
-    with open(ref_path, encoding="utf-8") as f:
-        return json.load(f)
-
-
-# ── Ollama helpers ────────────────────────────────────────────────────────────
-
-# Extraction prompt — structured output, Ollama format=json
-EXTRACT_PROMPT = """\
+# Phase 1 : extraction depuis texte OCR
+EXTRACT_PROMPT_TEXT = """\
 Tu es un assistant d'analyse de tickets de caisse et factures.
 Voici le texte extrait par OCR d'un document :
 
@@ -223,12 +202,29 @@ avec exactement ces trois clés :
 Règles strictes :
 - Ne jamais inventer ou reformater une valeur absente du texte OCR.
 - Pour "total" : prendre le montant final à payer (TOTAL, GRAND TOTAL, AMOUNT DUE).
-  Si le plus grand chiffre visible semble être un paiement en espèces, le prendre.
 - Pour "date" : recopier la date exactement comme dans le texte, sans la convertir.
 - Si une information n'est pas présente dans le texte OCR, écrire NOT FOUND.\
 """
 
-# Judge prompt — structured output, Ollama format=json
+# Phase 2 : extraction directement depuis l'image (pas de texte OCR)
+EXTRACT_PROMPT_VISION = """\
+Tu es un assistant d'analyse de tickets de caisse et factures.
+Regarde attentivement l'image du reçu fournie.
+
+Réponds UNIQUEMENT avec un objet JSON valide, sans aucun texte avant ou après,
+avec exactement ces trois clés :
+{
+  "total":     "<montant numérique final tel qu'il apparaît sur le reçu, ex: 33.90, ou NOT FOUND>",
+  "company":   "<nom de l'entreprise tel qu'il apparaît sur le reçu, ou NOT FOUND>",
+  "date":      "<date EXACTEMENT telle qu'elle apparaît sur le reçu, ex: 25/12/2018 ou 18-11-18, ou NOT FOUND>"
+}
+Règles strictes :
+- Lire directement sur l'image, ne rien inventer.
+- Pour "total" : prendre le montant final à payer (TOTAL, GRAND TOTAL, AMOUNT DUE).
+- Pour "date" : recopier la date exactement comme sur le reçu, sans la convertir.
+- Si une information n'est pas visible sur le reçu, écrire NOT FOUND.\
+"""
+
 JUDGE_PROMPT = """\
 Tu es un vérificateur de qualité pour un système d'extraction d'informations.
 Valeurs de référence (ground truth) :
@@ -241,51 +237,109 @@ Valeurs extraites :
   company   : {ext_company}
   date      : {ext_date}
 
-Pour chaque champ, indique CORRECT, PARTIEL ou INCORRECT selon ces règles strictes :
+Pour chaque champ, indique CORRECT, PARTIEL ou INCORRECT selon ces règles STRICTES et EXHAUSTIVES :
 
-Règle "total" : convertis les deux valeurs en nombre flottant (ex: 80.9 == 80.90).
-  CORRECT si les valeurs numériques sont égales. INCORRECT sinon.
-  Si la valeur extraite est NOT FOUND : INCORRECT.
+━━ Règle "total" ━━
+Convertis les deux valeurs en nombre flottant en ignorant les symboles monétaires (RM, $, etc.).
+  CORRECT  si les valeurs numériques sont strictement égales (ex: 80.9 == 80.90).
+  PARTIEL  si l'écart relatif est ≤ 5 % (ex: réf=52.45, extrait=53.00 → écart=1.1% → PARTIEL).
+  INCORRECT si l'écart > 5 %, ou si la valeur extraite est NOT FOUND.
 
-Règle "company" : CORRECT si le nom principal de l'entreprise est présent
-  (la forme juridique comme SDN BHD, la ville ou l'adresse peuvent être absentes).
-  PARTIEL si au moins 60 % des mots-clés du nom de référence sont présents.
-  INCORRECT si le nom principal est absent ou erroné.
+━━ Règle "company" ━━
+Trois cas possibles, dans l'ordre de priorité :
+  CORRECT   : l'extrait contient EXACTEMENT les mêmes mots que la référence,
+              ni plus ni moins (casse ignorée, ponctuation ignorée).
+              Ex: réf="OJC MARKETING SDN BHD", extrait="OJC MARKETING SDN BHD" → CORRECT.
+  PARTIEL   : (a) l'extrait contient tous les mots de la référence PLUS des mots supplémentaires
+                  (ex: réf="OJC MARKETING SDN BHD", extrait="OJC MARKETING SDN BHD ROC" → PARTIEL),
+              (b) l'extrait contient les mots principaux mais est incomplet
+                  (ex: réf="HON HWA HARDWARE TRADING", extrait="HARDWARE TRADING" → PARTIEL),
+              (c) le nom de marque visible sur le reçu est correct mais la raison sociale légale est absente
+                  (ex: réf="GERBANG ALAF RESTAURANTS SDN BHD", extrait="McDonald's" → INCORRECT car nom différent).
+  INCORRECT : faute d'orthographe sur un mot-clé du nom
+              (ex: réf="RESTORAN WAN SHENG", extrait="RESTORAN HAN" → INCORRECT),
+              ou nom complètement différent / inventé,
+              ou valeur extraite est NOT FOUND.
 
-Règle "date" : compare uniquement les valeurs numériques de jour, mois et année,
-  quel que soit le format (25/12/2018 == 25-12-18 == 2018-12-25).
-  CORRECT si jour + mois + année correspondent tous les trois.
-  INCORRECT si l'une des trois valeurs diffère, même légèrement.
-  Si la valeur extraite est NOT FOUND : INCORRECT.
+━━ Règle "date" ━━
+Convertis les deux dates en valeurs numériques (jour, mois, année) en reconnaissant tous les formats :
+  DD/MM/YYYY, DD-MM-YY, DD MMM YY, YYYY-MM-DD, D/M/YY, etc.
+  Les noms de mois anglais : Jan=1, Feb=2, Mar=3, Apr=4, May=5, Jun=6,
+                             Jul=7, Aug=8, Sep=9, Oct=10, Nov=11, Dec=12.
+  CORRECT   : jour + mois + année correspondent exactement
+              (ex: "22 Mar 18" == "22/03/2018" == "22-03-18" → CORRECT).
+  PARTIEL   : la date extraite correspond à ±1 jour calendaire
+              (ex: réf="29/01/2018", extrait="28/01/2018" → écart=1 jour → PARTIEL).
+  INCORRECT : écart > 1 jour, ou année incorrecte, ou NOT FOUND.
+  Note : une heure en plus de la date correcte ne change pas le verdict
+         (ex: "15/01/2019 11:05:16 AM" pour réf="15/01/2019" → CORRECT).
 
 Réponds UNIQUEMENT avec un objet JSON valide :
 {{
-  "total":   {{"verdict": "<CORRECT|PARTIEL|INCORRECT>", "reason": "<court>"}},
-  "company": {{"verdict": "<CORRECT|PARTIEL|INCORRECT>", "reason": "<court>"}},
-  "date":    {{"verdict": "<CORRECT|PARTIEL|INCORRECT>", "reason": "<court>"}}
+  "total":   {{"verdict": "<CORRECT|PARTIEL|INCORRECT>", "reason": "<explication courte>"}},
+  "company": {{"verdict": "<CORRECT|PARTIEL|INCORRECT>", "reason": "<explication courte>"}},
+  "date":    {{"verdict": "<CORRECT|PARTIEL|INCORRECT>", "reason": "<explication courte>"}}
 }}\
 """
 
 
-def _ollama_generate(host: str, model: str, prompt: str,
-                     max_tokens: int = 300) -> str:
+# ── Clients Ollama ────────────────────────────────────────────────────────────
+
+def _ollama_client(host: str):
     try:
         import ollama
     except ImportError as exc:
         raise ImportError("pip install ollama") from exc
-    client = ollama.Client(host=host)
+    return ollama.Client(host=host)
+
+
+def _image_to_b64(img: Image.Image) -> str:
+    """Encode une PIL Image en base64 PNG (format attendu par Ollama)."""
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def extract_info_phase1(host: str, model: str, ocr_text: str) -> dict:
+    """Phase 1 : extraction depuis le texte OCR (Mistral ou équivalent)."""
+    client = _ollama_client(host)
+    prompt = EXTRACT_PROMPT_TEXT.format(ocr_text=ocr_text[:3000])
     resp = client.chat(
         model=model,
         messages=[{"role": "user", "content": prompt}],
         format="json",
-        options={"temperature": 0.0, "num_predict": max_tokens},
+        options={"temperature": 0.0, "num_predict": 300},
     )
-    return resp["message"]["content"].strip()
+    raw = resp["message"]["content"].strip()
+    try:
+        data = json.loads(raw)
+        return {
+            "total":   str(data.get("total",   "NOT FOUND")).strip() or "NOT FOUND",
+            "company": str(data.get("company", "NOT FOUND")).strip() or "NOT FOUND",
+            "date":    str(data.get("date",    "NOT FOUND")).strip() or "NOT FOUND",
+        }
+    except json.JSONDecodeError:
+        return {"total": "NOT FOUND", "company": "NOT FOUND", "date": "NOT FOUND"}
 
 
-def extract_info(host: str, model: str, ocr_text: str) -> dict:
-    prompt = EXTRACT_PROMPT.format(ocr_text=ocr_text[:3000])
-    raw    = _ollama_generate(host, model, prompt)
+def extract_info_phase2(host: str, model: str, img: Image.Image) -> dict:
+    """Phase 2 : extraction directement depuis l'image (Qwen2.5-VL ou équivalent).
+
+    Pas de Tesseract — le modèle vision lit l'image brute du reçu.
+    """
+    client = _ollama_client(host)
+    encoded = _image_to_b64(img)
+    resp = client.chat(
+        model=model,
+        messages=[{
+            "role": "user",
+            "content": EXTRACT_PROMPT_VISION,
+            "images": [encoded],
+        }],
+        format="json",
+        options={"temperature": 0.0, "num_predict": 300},
+    )
+    raw = resp["message"]["content"].strip()
     try:
         data = json.loads(raw)
         return {
@@ -298,7 +352,30 @@ def extract_info(host: str, model: str, ocr_text: str) -> dict:
 
 
 def judge_info(host: str, model: str,
-               extracted: dict, reference: dict) -> dict:
+               extracted: dict, reference: dict,
+               fields: list[str]) -> dict:
+    """LLM juge uniquement les champs listés dans `fields`.
+
+    Le prompt ne mentionne que les champs à juger — les champs AUTO=CORRECT
+    ne sont jamais soumis au LLM.
+
+    Retourne un dict {field: verdict} uniquement pour les champs demandés.
+    """
+    if not fields:
+        return {}
+
+    client = _ollama_client(host)
+
+    # Construire les lignes de référence et d'extrait uniquement pour les
+    # champs à juger (les autres sont masqués pour ne pas perturber le LLM).
+    ref_lines = "\n".join(
+        f"  {f:<8} : {reference.get(f, '?')}" for f in fields
+    )
+    ext_lines = "\n".join(
+        f"  {f:<8} : {extracted[f]}" for f in fields
+    )
+    fields_str = ", ".join(f.upper() for f in fields)
+
     prompt = JUDGE_PROMPT.format(
         ref_total=reference.get("total",   "?"),
         ref_company=reference.get("company", "?"),
@@ -307,119 +384,256 @@ def judge_info(host: str, model: str,
         ext_company=extracted["company"],
         ext_date=extracted["date"],
     )
-    raw = _ollama_generate(host, model, prompt, max_tokens=400)
+
+    resp = client.chat(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        format="json",
+        options={"temperature": 0.0, "num_predict": 400},
+    )
+    raw = resp["message"]["content"].strip()
     try:
         data = json.loads(raw)
         return {
             field: data[field]["verdict"].upper()
-            for field in ("total", "company", "date")
+            for field in fields          # uniquement les champs demandés
             if field in data and "verdict" in data[field]
         }
     except (json.JSONDecodeError, KeyError, AttributeError):
         return {}
 
 
-# ── Auto comparison (no LLM needed) ──────────────────────────────────────────
+# Ordre de sévérité des verdicts (du plus favorable au moins favorable)
+_VERDICT_RANK = {"CORRECT": 3, "PARTIEL": 2, "NOT FOUND": 1, "INCORRECT": 0}
 
-def _norm_amount(s: str) -> str:
-    nums = re.findall(r"\d+\.?\d*", s.replace(",", "."))
+
+def merge_verdicts(auto: str, llm: str | None) -> str:
+    """Fusionne AUTO et LLM en garantissant que le LLM ne peut pas dégrader AUTO.
+
+    Règles :
+      - AUTO == CORRECT   → FINAL = CORRECT   (LLM ignoré)
+      - AUTO == NOT FOUND → FINAL = NOT FOUND (LLM ignoré — rien à juger)
+      - Sinon             → FINAL = max(AUTO, LLM) selon l'ordre de sévérité
+                            (on garde le verdict le plus favorable des deux)
+    """
+    if auto in ("CORRECT", "NOT FOUND"):
+        return auto
+    if llm is None:
+        return auto
+    return auto if _VERDICT_RANK.get(auto, 0) >= _VERDICT_RANK.get(llm, 0) else llm
+
+
+# ── Comparaison automatique (sans LLM juge) ──────────────────────────────────
+
+def _parse_amount(s: str) -> float | None:
+    """Extrait la valeur flottante d'une chaîne monétaire (ignore RM, $, etc.)."""
+    nums = re.findall(r"\d+[.,]\d+|\d+", s.replace(",", "."))
     if not nums:
-        return ""
+        return None
     try:
-        # Normalise via float so 80.9 == 80.90, 9.00 == 9.0, etc.
-        return str(float(nums[-1]))
+        return float(nums[-1])
     except ValueError:
-        return nums[-1]
+        return None
 
 
-def _norm_date(s: str) -> str:
-    return re.sub(r"[\s\-/\.]", "", s).lower()
+_MONTH_ABBR = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
 
 
-def _norm_company(s: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", s.lower())).strip()
+def _parse_date(s: str):
+    """
+    Tente de parser une date sous forme (jour, mois, année) depuis tout format courant.
+    Retourne (day, month, year) ou None si échec.
+    Formats reconnus : DD/MM/YYYY, DD-MM-YY, YYYY-MM-DD, DD MMM YY, D/M/YY, etc.
+    """
+    s = s.strip()
+    # Supprimer la partie heure si présente (ex: "15/01/2019 11:05:16 AM")
+    s = re.sub(r"\s+\d{1,2}:\d{2}(:\d{2})?(\s*(AM|PM))?$", "", s, flags=re.IGNORECASE).strip()
+
+    # Normaliser les séparateurs
+    # Essai "DD MMM YY" / "DD MMM YYYY" (ex: "22 Mar 18", "29 Jun 18")
+    m = re.match(r"(\d{1,2})\s+([A-Za-z]{3,})\s+(\d{2,4})$", s)
+    if m:
+        d, mon_str, y = int(m.group(1)), m.group(2).lower()[:3], int(m.group(3))
+        mon = _MONTH_ABBR.get(mon_str)
+        if mon:
+            year = 2000 + y if y < 100 else y
+            return (d, mon, year)
+
+    # Essai YYYY-MM-DD
+    m = re.match(r"(\d{4})[-/\.](\d{1,2})[-/\.](\d{1,2})$", s)
+    if m:
+        return (int(m.group(3)), int(m.group(2)), int(m.group(1)))
+
+    # Essai DD[-/.]MM[-/.]YYYY ou DD[-/.]MM[-/.]YY
+    m = re.match(r"(\d{1,2})[-/\.](\d{1,2})[-/\.](\d{2,4})$", s)
+    if m:
+        d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        year = 2000 + y if y < 100 else y
+        return (d, mo, year)
+
+    return None
+
+
+def _date_diff_days(a: str, b: str) -> int | None:
+    """Retourne la différence en jours entre deux chaînes de dates, ou None si parse échoue."""
+    pa, pb = _parse_date(a), _parse_date(b)
+    if pa is None or pb is None:
+        return None
+    try:
+        from datetime import date
+        da = date(pa[2], pa[1], pa[0])
+        db = date(pb[2], pb[1], pb[0])
+        return abs((da - db).days)
+    except ValueError:
+        return None
+
+
+def _norm_company_words(s: str) -> set[str]:
+    """Retourne l'ensemble des mots significatifs du nom (casse et ponctuation ignorées)."""
+    return set(re.sub(r"[^\w\s]", " ", s.lower()).split())
 
 
 def compare_field(field: str, extracted: str, reference: str) -> str:
+    """
+    Comparaison automatique par règle déterministe.
+
+    TOTAL  : CORRECT si égal, PARTIEL si écart ≤ 5%, INCORRECT sinon.
+    DATE   : CORRECT si même jour/mois/année (format-agnostique),
+             PARTIEL si écart ≤ 1 jour, INCORRECT sinon.
+    COMPANY: CORRECT si mots identiques exactement,
+             PARTIEL si extrait ⊇ référence (surplus) ou ⊂ référence (incomplet mais clé),
+             INCORRECT sinon (faute, nom différent).
+    """
     if extracted.upper() == "NOT FOUND":
         return "NOT FOUND"
+
+    # ── TOTAL ──────────────────────────────────────────────────────────────────
     if field == "total":
-        return "CORRECT" if _norm_amount(extracted) == _norm_amount(reference) \
-               else "INCORRECT"
-    if field == "date":
-        return "CORRECT" if _norm_date(extracted) == _norm_date(reference) \
-               else "INCORRECT"
-    if field == "company":
-        e, r = _norm_company(extracted), _norm_company(reference)
-        if e == r:
+        ref_v = _parse_amount(reference)
+        ext_v = _parse_amount(extracted)
+        if ref_v is None or ext_v is None:
+            return "INCORRECT"
+        if ref_v == ext_v:
             return "CORRECT"
-        rw, ew = set(r.split()), set(e.split())
-        if rw and len(rw & ew) / len(rw) >= 0.6:
+        if ref_v != 0 and abs(ext_v - ref_v) / abs(ref_v) <= 0.05:
             return "PARTIEL"
         return "INCORRECT"
+
+    # ── DATE ───────────────────────────────────────────────────────────────────
+    if field == "date":
+        diff = _date_diff_days(extracted, reference)
+        if diff is None:
+            # Fallback : comparaison caractère-par-caractère normalisée
+            def _strip(t):
+                return re.sub(r"[\s\-/\.]", "", t).lower()
+            return "CORRECT" if _strip(extracted) == _strip(reference) else "INCORRECT"
+        if diff == 0:
+            return "CORRECT"
+        if diff == 1:
+            return "PARTIEL"
+        return "INCORRECT"
+
+    # ── COMPANY ────────────────────────────────────────────────────────────────
+    if field == "company":
+        ref_words = _norm_company_words(reference)
+        ext_words = _norm_company_words(extracted)
+        if not ref_words:
+            return "INCORRECT"
+        if ref_words == ext_words:
+            return "CORRECT"
+        # Extrait contient tous les mots de la référence + surplus → PARTIEL
+        if ref_words.issubset(ext_words):
+            return "PARTIEL"
+        # Extrait est un sous-ensemble de la référence (incomplet) :
+        # PARTIEL si les mots communs couvrent ≥ 50% de la référence
+        overlap = ref_words & ext_words
+        if ref_words and len(overlap) / len(ref_words) >= 0.5:
+            return "PARTIEL"
+        return "INCORRECT"
+
     return "INCORRECT"
 
 
-# ── File pairing ──────────────────────────────────────────────────────────────
+# ── Détection des triplets dataset ────────────────────────────────────────────
 
-def find_pairs(docs_dir: Path) -> list:
+def find_triplets(dataset_dir: Path, split: str) -> list[tuple]:
     """
-    Pairs images with their JSON ground-truth (task-2 format).
-    Falls back to SROIE .txt if no JSON exists.
+    Parcourt <dataset_dir>/<split>/ et retourne des triplets :
+      (img_path, entities_dict, box_path | None)
     """
-    pairs = []
-    for img_path in sorted(docs_dir.iterdir()):
+    split_dir = dataset_dir / split
+    img_dir   = split_dir / "img"
+    ent_dir   = split_dir / "entities"
+    box_dir   = split_dir / "box"
+
+    if not img_dir.exists():
+        sys.exit(f"[ERROR] img/ introuvable : {img_dir}")
+    if not ent_dir.exists():
+        sys.exit(f"[ERROR] entities/ introuvable : {ent_dir}")
+
+    triplets = []
+    for img_path in sorted(img_dir.iterdir()):
         if img_path.suffix.lower() not in IMG_EXTS:
             continue
-        json_ref = docs_dir / (img_path.stem + ".txt")
-        if not json_ref.exists():
+        ent_path = ent_dir / (img_path.stem + ".txt")
+        if not ent_path.exists():
             continue
         try:
-            ref = json.loads(json_ref.read_text(encoding="utf-8"))
-            pairs.append((img_path, ref, "json"))
-        except json.JSONDecodeError:
-            # Plain SROIE task-1 text file — no structured ref for LLM judge
-            pairs.append((img_path, None, "txt"))
-    return pairs
+            raw = ent_path.read_bytes().decode("utf-8", errors="replace")
+            raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+            entities = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            print(f"  [WARN] JSON invalide ({ent_path.name}) : {exc}")
+            continue
+
+        box_path = (box_dir / (img_path.stem + ".txt")) if box_dir.exists() else None
+        if box_path and not box_path.exists():
+            box_path = None
+
+        triplets.append((img_path, entities, box_path))
+
+    return triplets
 
 
-# ── Display ───────────────────────────────────────────────────────────────────
-
-def _fmt(x: float) -> str:
-    return f"{x * 100:6.2f}%"
-
+# ── Affichage ─────────────────────────────────────────────────────────────────
 
 def print_doc_result(name, extracted, reference, auto, llm_verdicts, final):
-    sep = "─" * 75
+    sep = "─" * 78
     print(f"\n{sep}")
     print(f"  {name}")
-    print(f"  {'FIELD':<12} {'REFERENCE':<22} {'EXTRACTED':<22} {'AUTO':<12} "
+    print(f"  {'CHAMP':<10} {'RÉFÉRENCE':<26} {'EXTRAIT':<26} {'AUTO':<12} "
           f"{'LLM':<12} FINAL")
-    print(f"  {'-'*12} {'-'*22} {'-'*22} {'-'*12} {'-'*12} {'-'*10}")
+    print(f"  {'-'*10} {'-'*26} {'-'*26} {'-'*12} {'-'*12} {'-'*9}")
     for field in ("total", "company", "date"):
-        ref_v  = str(reference.get(field, "?"))[:21]
-        ext_v  = str(extracted.get(field, "?"))[:21]
+        ref_v  = str(reference.get(field, "?"))[:25]
+        ext_v  = str(extracted.get(field, "?"))[:25]
         auto_v = auto.get(field, "?")
         llm_v  = llm_verdicts.get(field, "—")
         fin_v  = final.get(field, "?")
-        print(f"  {field.upper():<12} {ref_v:<22} {ext_v:<22} "
+        print(f"  {field.upper():<10} {ref_v:<26} {ext_v:<26} "
               f"{color(auto_v, auto_v):<12} {color(llm_v, llm_v):<12} "
               f"{color(fin_v, fin_v)}")
 
 
-def print_stats(results: list) -> None:
+def print_stats(results: list, pipeline: str) -> dict:
     n = len(results)
     if not n:
-        return
-    sep = "=" * 70
+        return {}
+    sep = "=" * 72
     print(f"\n{sep}")
-    print(f"  GLOBAL STATS  ({n} documents)")
+    print(f"  RÉSULTATS GLOBAUX  ({n} reçus)  —  pipeline={pipeline.upper()}")
     print(sep)
+
+    field_counts = {}
     for field in ("total", "company", "date"):
         counts = {"CORRECT": 0, "PARTIEL": 0, "INCORRECT": 0, "NOT FOUND": 0}
         for r in results:
             v = r.get("comparisons", {}).get(field, "INCORRECT")
             counts[v] = counts.get(v, 0) + 1
+        field_counts[field] = counts
         cr = counts["CORRECT"]   / n * 100
         pr = counts["PARTIEL"]   / n * 100
         ir = counts["INCORRECT"] / n * 100
@@ -428,7 +642,17 @@ def print_stats(results: list) -> None:
         print(f"    Correct   : " + color(f"{counts['CORRECT']:3d} ({cr:5.1f}%)", "CORRECT"))
         print(f"    Partiel   : " + color(f"{counts['PARTIEL']:3d} ({pr:5.1f}%)", "PARTIEL"))
         print(f"    Incorrect : " + color(f"{counts['INCORRECT']:3d} ({ir:5.1f}%)", "INCORRECT"))
-        print(f"    Not found : {counts['NOT FOUND']:3d} ({nr:5.1f}%)")
+        print(f"    Non trouvé: {counts['NOT FOUND']:3d} ({nr:5.1f}%)")
+
+    # Nombre de reçus dont les 3 champs sont CORRECT
+    fully_correct = sum(
+        all(r.get("comparisons", {}).get(f, "") == "CORRECT"
+            for f in ("total", "company", "date"))
+        for r in results
+    )
+    print(f"\n  ── Précision globale ──")
+    print(f"  Reçus entièrement corrects (3/3) : "
+          + color(f"{fully_correct}/{n}  ({fully_correct/n*100:.1f}%)", "CORRECT"))
 
     score = sum(
         (r.get("comparisons", {}).get("total",   "") == "CORRECT") +
@@ -439,126 +663,190 @@ def print_stats(results: list) -> None:
         0.5 * (r.get("comparisons", {}).get("date",    "") == "PARTIEL")
         for r in results
     )
-    print(f"\n  Global score : {score:.1f} / {n * 3}  ({score / (n * 3) * 100:.1f}%)")
+    print(f"  Score pondéré                    : {score:.1f} / {n * 3}"
+          f"  ({score / (n * 3) * 100:.1f}%)")
     print(sep)
 
-    # Metric averages (when available)
-    metric_results = [r for r in results if "metrics" in r]
-    if metric_results:
-        m = len(metric_results)
-        avg = lambda k: sum(r["metrics"][k] for r in metric_results) / m
-        print(f"\n  OCR METRICS  ({m} docs with SROIE refs)")
-        print(f"    CER    : {_fmt(avg('cer'))}")
-        print(f"    WER    : {_fmt(avg('wer'))}")
-        print(f"    F1     : {_fmt(avg('f1'))}")
-        print(f"    Sim    : {_fmt(avg('sim'))}")
-        print(sep)
+    return {
+        "pipeline": pipeline,
+        "n_receipts": n,
+        "fully_correct": fully_correct,
+        "fully_correct_pct": round(fully_correct / n * 100, 2),
+        "weighted_score": score,
+        "max_score": n * 3,
+        "weighted_pct": round(score / (n * 3) * 100, 2),
+        "per_field": field_counts,
+    }
+
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Batch Tesseract OCR + Ollama LLM evaluation"
+        description="Évaluation par lot sur SROIE-Dataset_v2 (Phase 1 ou Phase 2)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--docs",       required=True,
-                        help="Directory with images + JSON ground-truth")
-    parser.add_argument("--out",        default=None,
-                        help="Output JSON results file")
-    parser.add_argument("--lang",       default="fra+eng")
-    parser.add_argument("--dpi",        type=int,   default=300)
-    parser.add_argument("--max-docs",   type=int,   default=None)
-    parser.add_argument("--enhance",    default="auto",
+    parser.add_argument("--pipeline",  default="phase1",
+                        choices=["phase1", "phase2"],
+                        help="phase1 = Tesseract + LLM texte (Mistral)  "
+                             "phase2 = image → LLM vision (Qwen2.5-VL), pas de Tesseract")
+    parser.add_argument("--dataset",   required=True,
+                        help="Racine du dataset (contient test/, train/, ...)")
+    parser.add_argument("--split",     default="test",
+                        help="Sous-dossier à évaluer : test ou train (défaut: test)")
+    parser.add_argument("--out",       default=None,
+                        help="Fichier JSON résultats (optionnel)")
+    parser.add_argument("--lang",      default="fra+eng",
+                        help="Codes langue Tesseract — Phase 1 uniquement (défaut: fra+eng)")
+    parser.add_argument("--dpi",       type=int, default=300,
+                        help="DPI de rasterisation des PDFs (défaut: 300)")
+    parser.add_argument("--max-docs",  type=int, default=None,
+                        help="Limite le nombre de documents traités")
+    parser.add_argument("--enhance",   default="auto",
                         choices=["auto", "on", "off"],
-                        help="Contrast filter: auto (default) = apply only on "
-                             "low-contrast images, on = always, off = never")
-    parser.add_argument("--alpha",      type=float, default=1.5,
-                        help="Contrast multiplier (default 1.5)")
-    parser.add_argument("--beta",       type=int,   default=0,
-                        help="Brightness offset (default 0)")
-    parser.add_argument("--llm-judge",  action="store_true",
-                        help="Enable LLM extraction + judgment via Ollama")
-    parser.add_argument("--ollama-host",  default=os.environ.get(
+                        help="Filtre contraste Tesseract — Phase 1 uniquement")
+    parser.add_argument("--alpha",     type=float, default=1.5)
+    parser.add_argument("--beta",      type=int,   default=0)
+    parser.add_argument("--use-box-annotations", action="store_true",
+                        help="Phase 1 : utiliser les annotations box/ au lieu de Tesseract")
+    parser.add_argument("--ollama-host",    default=os.environ.get(
                         "DOQMENT_OLLAMA_HOST", "http://localhost:11434"))
-    parser.add_argument("--ollama-model", default=os.environ.get(
-                        "DOQMENT_OLLAMA_TEXT_MODEL", "mistral:7b-instruct"))
+    parser.add_argument("--ollama-model",   default=os.environ.get(
+                        "DOQMENT_OLLAMA_TEXT_MODEL", "mistral:7b-instruct"),
+                        help="Modèle texte Ollama — Phase 1 extraction + juge (défaut: mistral:7b-instruct)")
+    parser.add_argument("--vision-model",   default=os.environ.get(
+                        "DOQMENT_OLLAMA_VISION_MODEL", "qwen2.5vl:7b"),
+                        help="Modèle vision Ollama — Phase 2 extraction (défaut: qwen2.5vl:7b)")
     args = parser.parse_args()
 
     enhance_mode = {"auto": "auto", "on": True, "off": False}[args.enhance]
+    pipeline = args.pipeline
 
-    docs_dir = Path(args.docs)
-    if not docs_dir.exists():
-        sys.exit(f"[ERROR] Directory not found: {docs_dir}")
+    dataset_dir = Path(args.dataset)
+    if not dataset_dir.exists():
+        sys.exit(f"[ERROR] Dataset introuvable : {dataset_dir}")
 
-    pairs = find_pairs(docs_dir)
-    if not pairs:
-        sys.exit("[ERROR] No image+JSON pairs found.")
+    triplets = find_triplets(dataset_dir, args.split)
+    if not triplets:
+        sys.exit(f"[ERROR] Aucun triplet img+entities trouvé dans "
+                 f"{dataset_dir / args.split}")
 
     if args.max_docs:
-        pairs = pairs[:args.max_docs]
+        triplets = triplets[:args.max_docs]
 
-    print(f"\n  {len(pairs)} document(s)  |  "
-          f"enhance={args.enhance} (α={args.alpha} β={args.beta})  |  "
-          f"LLM judge={'on' if args.llm_judge else 'off'}")
+    # Résumé de configuration
+    if pipeline == "phase1":
+        ocr_label = "annotations box/" if args.use_box_annotations else f"Tesseract ({args.lang})"
+        model_label = args.ollama_model
+    else:
+        ocr_label = "aucun (image directe)"
+        model_label = args.vision_model
+
+    print(f"\n  {len(triplets)} reçu(s)")
+    print(f"  pipeline     = {pipeline.upper()}")
+    print(f"  OCR          = {ocr_label}")
+    print(f"  modèle       = {model_label}")
+    print(f"  split        = {args.split}")
 
     results = []
 
-    for i, (img_path, reference, ref_type) in enumerate(pairs, 1):
-        print(f"\n[{i}/{len(pairs)}] {img_path.name}")
+    for i, (img_path, reference, box_path) in enumerate(triplets, 1):
+        print(f"\n[{i}/{len(triplets)}] {img_path.name}")
 
-        # 1. OCR
-        try:
-            img      = load_image(img_path, args.dpi)
-            ocr_text = run_ocr(img, args.lang,
-                               enhance=enhance_mode,
-                               alpha=args.alpha, beta=args.beta)
-        except Exception as exc:
-            print(f"  [WARN] OCR failed: {exc}")
-            continue
+        record = {
+            "file": img_path.name,
+            "pipeline": pipeline,
+            "reference": reference,
+        }
 
-        record = {"file": img_path.name, "reference": reference or {}}
+        # ── Phase 1 : Tesseract → LLM texte ──────────────────────────────────
+        if pipeline == "phase1":
+            if args.use_box_annotations and box_path:
+                ocr_text = read_box_annotation(box_path)
+                print(f"  Annotation box/ : {len(ocr_text)} chars")
+            else:
+                try:
+                    img = load_image(img_path, args.dpi)
+                    ocr_text = run_tesseract(img, args.lang,
+                                             enhance=enhance_mode,
+                                             alpha=args.alpha, beta=args.beta)
+                    print(f"  Tesseract OCR   : {len(ocr_text)} chars")
+                except Exception as exc:
+                    print(f"  [WARN] OCR échoué : {exc}")
+                    continue
 
-        # 2. LLM extraction + judgment (only for JSON refs)
-        auto_comparisons = {}
-        llm_verdicts     = {}
-        comparisons      = {}
+            extracted = extract_info_phase1(args.ollama_host, args.ollama_model,
+                                            ocr_text)
+            record["ocr_source"] = "box_annotations" if (args.use_box_annotations and box_path) \
+                                   else "tesseract"
 
-        if args.llm_judge and reference is not None:
-            extracted         = extract_info(args.ollama_host, args.ollama_model,
-                                             ocr_text)
-            auto_comparisons  = {
-                f: compare_field(f, extracted[f], reference.get(f, ""))
-                for f in ("total", "company", "date")
-            }
-            llm_verdicts = judge_info(args.ollama_host, args.ollama_model,
-                                      extracted, reference)
-            comparisons  = {
-                f: llm_verdicts.get(f) or auto_comparisons[f]
-                for f in ("total", "company", "date")
-            }
-            print_doc_result(img_path.name, extracted, reference,
-                             auto_comparisons, llm_verdicts, comparisons)
-            record.update({
-                "extracted":        extracted,
-                "auto_comparisons": auto_comparisons,
-                "llm_verdicts":     llm_verdicts,
-                "comparisons":      comparisons,
-            })
+        # ── Phase 2 : image → LLM vision ─────────────────────────────────────
         else:
-            # No LLM : only store raw OCR text
-            print(f"  OCR chars: {len(ocr_text)}")
-            record["ocr_text"] = ocr_text[:500]
+            try:
+                img = load_image(img_path, args.dpi)
+            except Exception as exc:
+                print(f"  [WARN] Chargement image échoué : {exc}")
+                continue
 
+            print(f"  Vision ({args.vision_model}) ← {img_path.name} "
+                  f"({img.width}×{img.height}px)")
+            extracted = extract_info_phase2(args.ollama_host, args.vision_model, img)
+            record["ocr_source"] = "none (vision directe)"
+
+        print(f"  → company={extracted['company']!r}  "
+              f"total={extracted['total']!r}  date={extracted['date']!r}")
+
+        # ── Comparaison (auto + juge LLM si nécessaire) ──────────────────────
+        auto_comparisons = {
+            f: compare_field(f, extracted[f], reference.get(f, ""))
+            for f in ("total", "company", "date")
+        }
+
+        # Le LLM n'est consulté que pour les champs PARTIEL ou INCORRECT.
+        # AUTO=CORRECT est certain — figé immédiatement.
+        # AUTO=NOT FOUND est certain aussi — le LLM ne peut rien extraire
+        # de plus que ce que le modèle d'extraction a déjà raté.
+        fields_needing_llm = [
+            f for f in ("total", "company", "date")
+            if auto_comparisons[f] not in ("CORRECT", "NOT FOUND")
+        ]
+
+        if fields_needing_llm:
+            llm_verdicts = judge_info(args.ollama_host, args.ollama_model,
+                                      extracted, reference,
+                                      fields=fields_needing_llm)
+        else:
+            llm_verdicts = {}  # tous CORRECT, pas besoin du LLM
+
+        # Fusion : AUTO=CORRECT est figé ; pour les autres on prend le
+        # verdict le plus favorable entre AUTO et LLM (le LLM ne peut
+        # pas dégrader un AUTO=PARTIEL en INCORRECT).
+        comparisons = {
+            f: merge_verdicts(auto_comparisons[f], llm_verdicts.get(f))
+            for f in ("total", "company", "date")
+        }
+
+        print_doc_result(img_path.name, extracted, reference,
+                         auto_comparisons, llm_verdicts, comparisons)
+
+        record.update({
+            "extracted":        extracted,
+            "auto_comparisons": auto_comparisons,
+            "llm_verdicts":     llm_verdicts,
+            "comparisons":      comparisons,
+        })
         results.append(record)
 
-    if args.llm_judge:
-        print_stats(results)
-
-    if args.out:
-        out_path = Path(args.out)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(results, f, ensure_ascii=False, indent=2)
-        print(f"\n  Results saved → {out_path}")
+    # ── Stats globales ────────────────────────────────────────────────────────
+    if results:
+        summary = print_stats(results, pipeline)
+        if args.out:
+            out_path = Path(args.out)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            output = {"summary": summary, "results": results}
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(output, f, ensure_ascii=False, indent=2)
+            print(f"\n  Résultats sauvegardés → {out_path}")
 
 
 if __name__ == "__main__":

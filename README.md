@@ -59,13 +59,14 @@ streamlit run app.py
 
 Aucun téléchargement automatique.
 
-**SROIE2019** (Pipeline 1) : <https://drive.google.com/drive/folders/1ShItNWXyiY1tFDM5W02bceHuJjyeeJl2>
-Décompressez sous `data/SROIE2019/` à la racine :
+**SROIE-Dataset_v2** (Pipeline 1 + évaluation) : décompressez sous `data/SROIE-Dataset_v2/` à la racine :
 
 ```
-data/SROIE2019/
-├── 0325updated.task1train(626p)/    ← images .jpg + annotations ICDAR .txt
-└── 0325updated.task2train(626p)/    ← entités JSON (company, date, total, address)
+data/SROIE-Dataset_v2/
+└── test/
+    ├── img/        ← images .jpg des reçus
+    ├── box/        ← annotations ICDAR (x1,y1,...,x4,y4,texte)
+    └── entities/   ← JSON ground-truth {company, date, address, total}
 ```
 
 **M3DocVQA** (Pipeline 2, benchmark optionnel) : <https://huggingface.co/datasets/JaehyeongJung/m3docvqa>
@@ -77,22 +78,20 @@ data/SROIE2019/
 ## Pipeline 1 — textuel
 
 ```bash
-# Indexer SROIE — pointer sur le dossier racine suffit, l'ingestion
-# scanne récursivement et auto-détecte les fichiers d'entités JSON.
-python scripts/phase1.py ingest --dir data/SROIE2019
+# Indexer SROIE-Dataset_v2 — pointer sur le dossier racine suffit.
+python scripts/phase1.py ingest --dir data/SROIE-Dataset_v2
 
-# Pour les documents sans annotation SROIE, ajouter --tesseract
-# (sinon ils sont silencieusement sautés) :
-python scripts/phase1.py ingest --dir data/SROIE2019 --tesseract
+# Pour les images sans annotation box/, activer Tesseract :
+python scripts/phase1.py ingest --dir data/SROIE-Dataset_v2 --tesseract
 
 # Question contre toute la base.
 python scripts/phase1.py db --question "What is the total amount?"
 
 # Question sur un seul document (avec ou sans annotation).
 python scripts/phase1.py doc \
-    --file "data/SROIE2019/0325updated.task1train(626p)/X51005268420.jpg" \
+    --file "data/SROIE-Dataset_v2/test/img/X51005268420.jpg" \
     --question "What is the company name?" \
-    --annotation "data/SROIE2019/0325updated.task1train(626p)/X51005268420.txt"
+    --annotation "data/SROIE-Dataset_v2/test/box/X51005268420.txt"
 ```
 
 L'annotation `--annotation` est facultative ; sans elle, Tesseract OCR tourne automatiquement sur l'image.
@@ -114,7 +113,59 @@ python scripts/phase2.py doc --file path/to/invoice.pdf --question "..."
 
 ---
 
-## Configuration
+## Évaluation de la précision (SROIE-Dataset_v2)
+
+Le script `scripts/ocr_eval_batch.py` mesure la précision d'extraction sur chaque reçu du dataset. Pour chaque reçu, il pose trois questions (company, total, date) et vérifie que le modèle répond correctement en comparant avec la ground-truth `entities/`.
+
+Le flag `--pipeline` choisit le modèle évalué :
+
+| `--pipeline` | OCR | Modèle d'extraction | Modèle juge |
+|---|---|---|---|
+| `phase1` | Tesseract | `--ollama-model` (Mistral) | `--ollama-model` (Mistral) |
+| `phase2` | **aucun** — image directe | `--vision-model` (Qwen2.5-VL) | `--ollama-model` (Mistral) |
+
+```bash
+# ── Phase 1 (Tesseract + Mistral) ──────────────────────────────────────────
+python scripts/ocr_eval_batch.py \
+    --pipeline phase1 \
+    --dataset  data/SROIE-Dataset_v2 \
+    --split    test \
+    --out      data/eval/results_phase1.json
+
+# ── Phase 2 (image → Qwen2.5-VL, pas de Tesseract) ─────────────────────────
+python scripts/ocr_eval_batch.py \
+    --pipeline phase2 \
+    --dataset  data/SROIE-Dataset_v2 \
+    --split    test \
+    --out      data/eval/results_phase2.json
+
+# ── Test rapide (10 reçus) ───────────────────────────────────────────────────
+python scripts/ocr_eval_batch.py \
+    --pipeline phase1 \
+    --dataset  data/SROIE-Dataset_v2 --split test \
+    --max-docs 10
+
+# ── Phase 1 avec annotations box/ (bypass Tesseract, évalue extraction seule)
+python scripts/ocr_eval_batch.py \
+    --pipeline phase1 --use-box-annotations \
+    --dataset  data/SROIE-Dataset_v2 --split test
+```
+
+**Métriques rapportées** :
+
+| Métrique | Description |
+|---|---|
+| Reçus entièrement corrects | Reçus où les 3 champs (company, total, date) sont CORRECT |
+| Score pondéré | CORRECT=1 pt, PARTIEL=0.5 pt, INCORRECT=0 pt — sur N×3 pts |
+| Par champ | Taux CORRECT / PARTIEL / INCORRECT / NOT FOUND par field |
+
+**Verdicts** :
+- `CORRECT` — valeur extraite correspond exactement à la référence
+- `PARTIEL` — company : ≥ 60 % des mots-clés présents
+- `INCORRECT` — valeur extraite incorrecte
+- `NOT FOUND` — le modèle n'a pas trouvé l'information
+
+
 
 Tout vit dans `doqment/settings.py` — une seule dataclass `Settings` avec des défauts sensés. Pour surcharger sans toucher au code, exporter des variables d'environnement :
 
@@ -201,7 +252,7 @@ Les coéquipiers ont livré du code Python qu'on conserve **byte-identique aux o
 | `ingestion.py` + `pipeline1.py` | Indexation canonique SROIE (coéquipier 1) | `doqment/phase1.py` |
 | `pipeline_rag2.py` | RAG complet avec REPL (coéquipier 2) | usage standalone |
 | `pdf_ocr.py` | OCR Tesseract autonome (coéquipier 2) | extraction texte hors RAG |
-| `Comparaison_OCR.py` | Benchmark Tesseract vs PaddleOCR (coéquipier 2) | diagnostic d'OCR |
+| `Comparaison_OCR.py` | Benchmark Tesseract sur SROIE-Dataset_v2 (coéquipier 2) | diagnostic d'OCR |
 
 ---
 

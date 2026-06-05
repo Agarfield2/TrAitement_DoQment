@@ -31,7 +31,7 @@ console = Console()
 @app.command()
 def ingest(
     task1: str = typer.Option(
-        "data/SROIE2019",
+        "data/SROIE-Dataset_v2",
         "--task1", "--dir",
         help="Folder to ingest (scanned recursively).",
     ),
