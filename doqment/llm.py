@@ -19,6 +19,20 @@ from dataclasses import dataclass
 logger = logging.getLogger(__name__)
 
 
+### Vision generation knobs ###
+#
+# These guard Qwen2.5-VL against the repetition-collapse failure on dense
+# document pages (endless `<|im_start|>`). `num_ctx` must be large enough to
+# hold the system prompt, the question and `generate_k` downscaled pages
+# without truncation ; `num_predict` bounds runaway generation ; the repeat
+# penalty breaks any loop that still starts.
+
+_VLM_NUM_CTX = 8192
+_VLM_NUM_PREDICT = 1024
+_VLM_REPEAT_PENALTY = 1.1
+_VLM_MAX_IMAGE_EDGE = 1568
+
+
 ### Public API ###
 
 def generate_text(prompt, *, model, host, keep_alive="5m"):
@@ -102,7 +116,12 @@ def generate_vision(prompt, images, *, model, host, keep_alive="5m"):
         ],
         keep_alive=keep_alive,
         format="json",
-        options={"temperature": 0.0},
+        options={
+            "temperature": 0.0,
+            "num_ctx": _VLM_NUM_CTX,
+            "num_predict": _VLM_NUM_PREDICT,
+            "repeat_penalty": _VLM_REPEAT_PENALTY,
+        },
     )
 
     raw = response["message"]["content"].strip()
@@ -136,6 +155,12 @@ def _image_to_b64(image):
     """
     Encodes a PIL image as base64 PNG, the format Ollama expects.
 
+    The image is downscaled so its longest edge is at most
+    `_VLM_MAX_IMAGE_EDGE` pixels. Full-page rasters at 200-300 DPI are
+    several thousand vision tokens each ; three of them overflow the VLM
+    context, truncate the prompt and trigger the `<|im_start|>` repetition
+    collapse. Capping the edge keeps each page near ~1k vision tokens.
+
     Args:
         image (PIL.Image.Image): The page image.
 
@@ -143,8 +168,15 @@ def _image_to_b64(image):
         str: Base64-encoded PNG bytes.
     """
 
+    img = image.convert("RGB")
+    longest = max(img.size)
+    if longest > _VLM_MAX_IMAGE_EDGE:
+        scale = _VLM_MAX_IMAGE_EDGE / longest
+        new_size = (round(img.width * scale), round(img.height * scale))
+        img = img.resize(new_size)
+
     buf = io.BytesIO()
-    image.convert("RGB").save(buf, format="PNG")
+    img.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 

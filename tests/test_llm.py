@@ -81,6 +81,30 @@ def test_image_to_b64_converts_non_rgb():
         assert isinstance(encoded, str) and len(encoded) > 0
 
 
+def test_image_to_b64_downscales_oversized_pages():
+    """Pages larger than the edge cap are shrunk to bound vision tokens."""
+    import base64
+    import io
+
+    from PIL import Image
+
+    img = Image.new("RGB", (2480, 3508), color="white")  # ~A4 @ 300 DPI
+    decoded = base64.b64decode(llm._image_to_b64(img))
+    assert max(Image.open(io.BytesIO(decoded)).size) == llm._VLM_MAX_IMAGE_EDGE
+
+
+def test_image_to_b64_keeps_small_pages_untouched():
+    """Images already under the cap are not resized."""
+    import base64
+    import io
+
+    from PIL import Image
+
+    img = Image.new("RGB", (800, 600), color="white")
+    decoded = base64.b64decode(llm._image_to_b64(img))
+    assert Image.open(io.BytesIO(decoded)).size == (800, 600)
+
+
 ### Tests : missing dependency ###
 
 def test_client_raises_clear_error_when_ollama_missing(monkeypatch):
