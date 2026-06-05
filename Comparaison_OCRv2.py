@@ -17,7 +17,7 @@ from PIL import Image
 import pytesseract
 import cv2
 
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+pytesseract.pytesseract.tesseract_cmd = os.environ.get("DOQMENT_TESSERACT_PATH", "/usr/bin/tesseract")
 
 
 # TEXT LINE STRUCTURE
@@ -289,8 +289,8 @@ def print_summary(results):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--images", default="data/task1et2_test")
-    parser.add_argument("--refs", default="data/text_task1&2-test")
+    parser.add_argument("--images", default="data/SROIE2019/task1&2_test(361p)")
+    parser.add_argument("--refs",   default="data/SROIE2019/text.task1&2-test（361p)")
     parser.add_argument("--engine", choices=["tesseract", "paddle"], default="tesseract")
     parser.add_argument("--lang", default="fra")
     parser.add_argument("--dpi", type=int, default=300)
