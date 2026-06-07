@@ -1,18 +1,27 @@
 """
-Evaluation script - Tesseract / docTR (/ Surya / Kraken) vs SROIE ground-truth.
+Evaluation script - Tesseract / docTR vs SROIE ground-truth.
+
+Expected dataset layout (SROIE-Dataset_v2) :
+  <root>/<split>/img/        receipt images (.jpg)
+  <root>/<split>/box/        SROIE box-format ground-truth (.txt)
+  <root>/<split>/entities/   key-value JSON (unused for OCR text eval)
+where <split> is "test" or "train".
 
 USAGE
-  # Full dataset (all engines) :
-  python Comparaison_OCR.py --images data/SROIE2019/task1&2_test(361p) \\
-                             --refs   "data/SROIE2019/text.task1&2-test（361p)"
+  # Test split, all engines :
+  python Comparaison_OCR.py --root SROIE-Dataset_v2 --split test
+
+  # Train split :
+  python Comparaison_OCR.py --root SROIE-Dataset_v2 --split train
+
+  # Both splits at once :
+  python Comparaison_OCR.py --root SROIE-Dataset_v2 --split both
 
   # Quick sample (10 files) :
-  python Comparaison_OCR.py --images data/SROIE2019/task1&2_test(361p) \\
-                             --refs   "data/SROIE2019/text.task1&2-test（361p)" \\
-                             --max-docs 10
+  python Comparaison_OCR.py --root SROIE-Dataset_v2 --max-docs 10
 
   # Select specific engines :
-  python Comparaison_OCR.py ... --engines tesseract doctr
+  python Comparaison_OCR.py --root SROIE-Dataset_v2 --engines tesseract doctr
 
   # Without contrast enhancement (Tesseract) :
   python Comparaison_OCR.py ... --enhance off
@@ -26,8 +35,6 @@ USAGE
 Engines available :
   tesseract  - classic OCR, requires pytesseract + Tesseract binary
   doctr      - deep-learning OCR by Mindee (pip install python-doctr)
-  surya      - transformer-based multilingual OCR (pip install surya-ocr)
-  kraken     - sequence-to-sequence OCR, strong on historical docs (pip install kraken)
 
 Metrics reported per document and globally (per engine) :
   CER (Character Error Rate), WER (Word Error Rate),
@@ -46,15 +53,9 @@ import numpy as np
 from PIL import Image
 import pytesseract
 
-# Tesseract path : Windows default, overridable via env var
-import platform as _platform
-_default_tesseract = (
-    r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-    if _platform.system() == "Windows"
-    else "/usr/bin/tesseract"
-)
+
 pytesseract.pytesseract.tesseract_cmd = os.environ.get(
-    "DOQMENT_TESSERACT_PATH", _default_tesseract
+    "DOQMENT_TESSERACT_PATH", "/usr/bin/tesseract"
 )
 
 
@@ -245,228 +246,6 @@ def ocr_doctr_lines(img: Image.Image) -> list:
     return lines
 
 
-# ── OCR - Surya ───────────────────────────────────────────────────────────────
-
-def ocr_surya_lines(img: Image.Image, langs: list = None) -> list:
-    """
-    Run Surya OCR on a PIL image.
-    Install : pip install surya-ocr
-    langs   : list of BCP-47 language codes, e.g. ["fr", "en"].
-              Defaults to ["fr", "en"] when None.
-
-    Supports surya-ocr >= 0.20 (new API) and older versions.
-    """
-    if langs is None:
-        langs = ["fr", "en"]
-
-    # ── surya >= 0.20 : SuryaInferenceManager API ────────────────────────────
-    try:
-        from surya.inference import SuryaInferenceManager
-        from surya.recognition import RecognitionPredictor
-
-        if not hasattr(ocr_surya_lines, "_models_v2"):
-            manager = SuryaInferenceManager()
-            ocr_surya_lines._models_v2 = RecognitionPredictor(manager)
-        rec_predictor = ocr_surya_lines._models_v2
-
-        results = rec_predictor([img])
-        lines = []
-        for page_result in results:
-            # v0.20 returns .blocks with .html and .bbox
-            blocks = getattr(page_result, "blocks", None)
-            if blocks is not None:
-                from bs4 import BeautifulSoup
-                for block in blocks:
-                    soup = BeautifulSoup(getattr(block, "html", ""), "html.parser")
-                    text = soup.get_text(" ", strip=True)
-                    if not text:
-                        continue
-                    bbox = tuple(block.bbox) if hasattr(block, "bbox") else None
-                    conf = float(getattr(block, "confidence", 1.0))
-                    lines.append(TextLine(text=text, bbox=bbox, confidence=conf))
-            else:
-                # fallback: .text_lines (older 0.20.x builds)
-                for line in getattr(page_result, "text_lines", []):
-                    text = line.text.strip()
-                    if not text:
-                        continue
-                    bbox = tuple(line.bbox)
-                    conf = float(line.confidence)
-                    lines.append(TextLine(text=text, bbox=bbox, confidence=conf))
-        return lines
-
-    except ImportError:
-        pass  # fall through to intermediate API
-
-    # ── surya ~0.10-0.19 : RecognitionPredictor(det_predictor=...) ────────────
-    try:
-        from surya.recognition import RecognitionPredictor
-        from surya.detection import DetectionPredictor
-
-        if not hasattr(ocr_surya_lines, "_models_mid"):
-            ocr_surya_lines._models_mid = (
-                RecognitionPredictor(),
-                DetectionPredictor(),
-            )
-        rec_predictor, det_predictor = ocr_surya_lines._models_mid
-        results = rec_predictor([img], [langs], det_predictor=det_predictor)
-        lines = []
-        for page_result in results:
-            for line in page_result.text_lines:
-                text = line.text.strip()
-                if not text:
-                    continue
-                bbox = tuple(line.bbox)
-                conf = float(line.confidence)
-                lines.append(TextLine(text=text, bbox=bbox, confidence=conf))
-        return lines
-
-    except (ImportError, TypeError):
-        pass  # fall through to legacy API
-
-    # ── surya < 0.10 : run_ocr() ──────────────────────────────────────────────
-    try:
-        from surya.ocr import run_ocr
-        from surya.model.detection.model import load_model as load_det_model
-        from surya.model.detection.processor import load_processor as load_det_processor
-        from surya.model.recognition.model import load_model as load_rec_model
-        from surya.model.recognition.processor import load_processor as load_rec_processor
-    except ImportError:
-        raise ImportError("Surya not installed. Run: pip install surya-ocr")
-
-    if not hasattr(ocr_surya_lines, "_models_legacy"):
-        ocr_surya_lines._models_legacy = (
-            load_det_model(), load_det_processor(),
-            load_rec_model(), load_rec_processor(),
-        )
-    det_model, det_processor, rec_model, rec_processor = ocr_surya_lines._models_legacy
-    results = run_ocr([img], [langs], det_model, det_processor,
-                      rec_model, rec_processor)
-    lines = []
-    for page_result in results:
-        for line in page_result.text_lines:
-            text = line.text.strip()
-            if not text:
-                continue
-            bbox = tuple(line.bbox)
-            conf = float(line.confidence)
-            lines.append(TextLine(text=text, bbox=bbox, confidence=conf))
-    return lines
-
-
-# ── OCR - Kraken ──────────────────────────────────────────────────────────────
-
-def ocr_kraken_lines(img: Image.Image, model_path: str = None) -> list:
-    """
-    Run Kraken OCR on a PIL image.
-    Install : pip install kraken
-    model_path : path to a .mlmodel file.
-                 Defaults to the bundled English model if None.
-
-    Kraken pipeline : binarize → segment → recognize.
-
-    Windows note : Kraken reads text files with the system locale encoding
-    which on French/English Windows is cp1252 and crashes on certain model
-    metadata bytes.  We temporarily patch builtins.open to force UTF-8 for
-    the duration of model loading.
-    """
-    import builtins
-
-    _real_open = builtins.open
-
-    def _utf8_open(file, mode="r", buffering=-1, encoding=None,
-                   errors=None, newline=None, closefd=True, opener=None):
-        if "b" not in str(mode) and encoding is None:
-            encoding = "utf-8"
-            errors = errors or "replace"
-        return _real_open(file, mode, buffering, encoding,
-                          errors, newline, closefd)
-
-    try:
-        from kraken import binarization, pageseg, rpred
-        from kraken.lib import models as kraken_models
-    except ImportError:
-        raise ImportError(
-            "Kraken not installed. Run: pip install kraken"
-        )
-
-    # Lazy-load model (cached per model_path key)
-    cache_key = model_path or "__default__"
-    if not hasattr(ocr_kraken_lines, "_models"):
-        ocr_kraken_lines._models = {}
-    if cache_key not in ocr_kraken_lines._models:
-        builtins.open = _utf8_open          # patch before loading
-        try:
-            if model_path:
-                ocr_kraken_lines._models[cache_key] = kraken_models.load_any(model_path)
-            else:
-                # kraken.repo.get_model was removed in kraken >= 4.x.
-                # The model must be downloaded once via CLI:
-                #   kraken get 10.5281/zenodo.2577813
-                # then passed with --kraken-model <path>.
-                # We try a few common default locations before giving up.
-                import pathlib
-                # Search in ~/.kraken and in htrmopo cache (kraken >= 4.x)
-                # htrmopo stores models in:
-                #   Windows : %LOCALAPPDATA%/htrmopo/htrmopo/<uuid>/
-                #   Linux   : ~/.local/share/htrmopo/<uuid>/
-                import os as _os
-                local_app = pathlib.Path(
-                    _os.environ.get("LOCALAPPDATA",
-                                    pathlib.Path.home() / ".local" / "share")
-                )
-                htrmopo_base = local_app / "htrmopo" / "htrmopo"
-                mlmodels_htrmopo = sorted(htrmopo_base.rglob("*.mlmodel")) if htrmopo_base.exists() else []
-                candidates = [
-                    pathlib.Path.home() / ".kraken" / "en_best.mlmodel",
-                    pathlib.Path.home() / ".kraken" / "en-default.mlmodel",
-                ] + mlmodels_htrmopo
-                found = next((p for p in candidates if p.exists()), None)
-                if found:
-                    ocr_kraken_lines._models[cache_key] = kraken_models.load_any(str(found))
-                else:
-                    raise FileNotFoundError(
-                        "No default Kraken model found. Download one first:\n"
-                        "  kraken get 10.5281/zenodo.2577813\n"
-                        "Then pass it explicitly:\n"
-                        "  --kraken-model ~/.kraken/<model>.mlmodel"
-                    )
-        finally:
-            builtins.open = _real_open      # always restore
-
-    model = ocr_kraken_lines._models[cache_key]
-
-    # Kraken expects a grayscale/binarized PIL image
-    bw = binarization.nlbin(img.convert("L"))
-
-    # kraken >= 4.x removed return_lines; segment() now always returns a
-    # RecognitionResults-compatible object with a .lines attribute.
-    import inspect as _inspect
-    seg_kwargs = {"text_direction": "horizontal-lr"}
-    if "return_lines" in _inspect.signature(pageseg.segment).parameters:
-        seg_kwargs["return_lines"] = True   # kraken < 4.x compat
-    seg = pageseg.segment(bw, **seg_kwargs)
-
-    pred = rpred.rpred(model, bw, seg)
-
-    lines = []
-    for record in pred:
-        text = record.prediction.strip()
-        if not text:
-            continue
-        # record.line.boundary is a list of (x, y) polygon points
-        if hasattr(record, "line") and hasattr(record.line, "boundary") and record.line.boundary:
-            pts = record.line.boundary
-            xs = [p[0] for p in pts]
-            ys = [p[1] for p in pts]
-            bbox = (min(xs), min(ys), max(xs), max(ys))
-        else:
-            bbox = None
-        conf = float(np.mean(record.confidences)) if getattr(record, "confidences", None) else 0.0
-        lines.append(TextLine(text=text, bbox=bbox, confidence=conf))
-    return lines
-
-
 # ── Reference parser (SROIE format) ──────────────────────────────────────────
 
 def parse_ref_file(ref_path: Path) -> str:
@@ -529,14 +308,43 @@ def similarity(ref, hyp) -> float:
 
 # ── File pairing ──────────────────────────────────────────────────────────────
 
-def find_pairs(images_dir: Path, refs_dir: Path) -> list:
+def resolve_split_dirs(root: Path, split: str) -> list:
+    """
+    Return a list of (img_dir, box_dir) for the requested split, following the
+    SROIE-Dataset layout:
+
+        <root>/<split>/img/        - receipt images (.jpg)
+        <root>/<split>/box/        - SROIE box-format ground-truth (.txt)
+        <root>/<split>/entities/   - key-value JSON (unused for OCR text eval)
+
+    split = "test" | "train" | "both".
+    """
+    splits = ["test", "train"] if split == "both" else [split]
+    out = []
+    for s in splits:
+        img_dir = root / s / "img"
+        box_dir = root / s / "box"
+        if img_dir.is_dir() and box_dir.is_dir():
+            out.append((img_dir, box_dir))
+        else:
+            print(f"  [WARN] split '{s}' not found under {root} "
+                  f"(expected {img_dir} and {box_dir})")
+    return out
+
+
+def find_pairs(root: Path, split: str) -> list:
+    """
+    Pair each image with its box-format ground-truth, across one or both splits.
+    Images and refs share the same stem (e.g. X00016469670.jpg <-> X00016469670.txt).
+    """
     pairs = []
-    for img in sorted(images_dir.iterdir()):
-        if img.suffix.lower() not in IMG_EXTS:
-            continue
-        ref = refs_dir / (img.stem + ".txt")
-        if ref.exists():
-            pairs.append((img, ref))
+    for img_dir, box_dir in resolve_split_dirs(root, split):
+        for img in sorted(img_dir.iterdir()):
+            if img.suffix.lower() not in IMG_EXTS:
+                continue
+            ref = box_dir / (img.stem + ".txt")
+            if ref.exists():
+                pairs.append((img, ref))
     return pairs
 
 
@@ -600,7 +408,7 @@ def print_grid_summary(grid_results: dict) -> None:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-ALL_ENGINES = ["tesseract", "doctr", "surya", "kraken"]
+ALL_ENGINES = ["tesseract", "doctr"]
 
 # Grid search parameter space for Tesseract preprocessing
 GRID_ENHANCE = ["off", "auto", "on"]
@@ -619,30 +427,28 @@ def run_engine(engine: str, img: Image.Image, args,
                                    enhance=enh, alpha=alph, beta=bet)
     elif engine == "doctr":
         return ocr_doctr_lines(img)
-    elif engine == "surya":
-        langs = [l.strip() for l in args.lang.split("+")]
-        return ocr_surya_lines(img, langs=langs)
-    elif engine == "kraken":
-        return ocr_kraken_lines(img, model_path=args.kraken_model)
     else:
         raise ValueError(f"Unknown engine: {engine}")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="OCR evaluation (Tesseract / docTR / Surya / Kraken) "
+        description="OCR evaluation (Tesseract / docTR) "
                     "against SROIE ground-truth"
     )
-    parser.add_argument("--images",
-                        default="data/SROIE2019/task1&2_test(361p)")
-    parser.add_argument("--refs",
-                        default="data/SROIE2019/text.task1&2-test（361p)")
+    parser.add_argument("--root",
+                        default="data/SROIE-Dataset_v2",
+                        help="Dataset root containing test/ and train/ "
+                             "sub-folders, each with img/ (images) and box/ "
+                             "(SROIE box-format ground-truth)")
+    parser.add_argument("--split", default="test",
+                        choices=["test", "train", "both"],
+                        help="Which split to evaluate (default: test)")
     parser.add_argument("--engines", nargs="+", default=ALL_ENGINES,
                         choices=ALL_ENGINES,
-                        help="Engines to run (default: all four)")
+                        help="Engines to run (default: tesseract + doctr)")
     parser.add_argument("--lang",     default="fra+eng",
-                        help="Language(s) for Tesseract (e.g. fra+eng) and "
-                             "Surya (BCP-47 codes joined by '+', e.g. fr+en)")
+                        help="Language(s) for Tesseract (e.g. fra+eng)")
     parser.add_argument("--dpi",      type=int, default=300)
     parser.add_argument("--max-docs", type=int, default=None,
                         help="Limit processing to N files")
@@ -655,20 +461,16 @@ def main():
                         help="Contrast multiplier for Tesseract (default 1.5)")
     parser.add_argument("--beta",     type=int,   default=0,
                         help="Brightness offset for Tesseract (default 0)")
-    parser.add_argument("--kraken-model", default=None,
-                        help="Path to a Kraken .mlmodel file "
-                             "(default: downloads en_best.mlmodel)")
     parser.add_argument("--tesseract-grid", action="store_true",
                         help="Grid search over Tesseract preprocessing params "
                              "(enhance x alpha x beta). Ignores --enhance/--alpha/--beta.")
     args = parser.parse_args()
 
-    images_dir = Path(args.images)
-    refs_dir   = Path(args.refs)
+    root = Path(args.root)
 
-    pairs = find_pairs(images_dir, refs_dir)
+    pairs = find_pairs(root, args.split)
     if not pairs:
-        print("No image/ref pairs found.")
+        print(f"No image/ref pairs found under {root} (split: {args.split}).")
         sys.exit(1)
 
     if args.max_docs is not None:
@@ -689,8 +491,9 @@ def main():
 
         grid_results = {c: [] for c in combos}
 
-        for img_path, ref_path in pairs:
-            print(f"\n── {img_path.name} ──")
+        cw = len(str(len(pairs)))                 # counter width
+        for idx, (img_path, ref_path) in enumerate(pairs, 1):
+            print(f"\n[{idx:>{cw}}/{len(pairs)}] {img_path.name}")
             try:
                 img = load_image(img_path, args.dpi)
             except Exception as exc:
@@ -700,7 +503,7 @@ def main():
 
             for (enh, alph, bet) in combos:
                 enh_mode = {"auto": "auto", "on": True, "off": False}[enh]
-                label = f"enhance={enh} alpha={alph} beta={bet}"
+                label = f"enhance={enh:<4} alpha={alph:.2f} beta={bet:>2}"
                 try:
                     lines = ocr_tesseract_lines(img, args.lang,
                                                 enhance=enh_mode,
@@ -717,7 +520,7 @@ def main():
                 grid_results[(enh, alph, bet)].append(
                     {"cer": c, "wer": w, "p": p, "r": r, "f1": f1, "sim": s}
                 )
-                print(f"  [{label}]  CER={fmt(c)} F1={fmt(f1)}")
+                print(f"  [{label}]  CER={fmt(c)}  F1={fmt(f1)}")
 
         print_grid_summary(grid_results)
         return
@@ -726,8 +529,12 @@ def main():
     print(f"Engines : {', '.join(args.engines)}")
     results_by_engine = {e: [] for e in args.engines}
 
-    for img_path, ref_path in pairs:
-        print(f"\n── {img_path.name} ──")
+    total = len(pairs)
+    cw    = len(str(total))                       # counter width  (e.g. 2 -> "40")
+    ew    = max(len(e) for e in args.engines) + 2  # engine tag width (incl. [])
+
+    for idx, (img_path, ref_path) in enumerate(pairs, 1):
+        print(f"\n[{idx:>{cw}}/{total}] {img_path.name}")
         try:
             img = load_image(img_path, args.dpi)
         except Exception as exc:
@@ -737,11 +544,11 @@ def main():
         ref = parse_ref_file(ref_path)
 
         for engine in args.engines:
-            print(f"  [{engine}]", end="  ", flush=True)
+            print(f"  {('[' + engine + ']'):<{ew}}", end="  ", flush=True)
             try:
                 lines = run_engine(engine, img, args)
             except ImportError as exc:
-                print(f"SKIP - {exc}")
+                print(f"SKIP  - {exc}")
                 continue
             except Exception as exc:
                 print(f"ERROR - {exc}")
@@ -756,7 +563,7 @@ def main():
             results_by_engine[engine].append(
                 {"cer": c, "wer": w, "p": p, "r": r, "f1": f1, "sim": s}
             )
-            print(f"CER={fmt(c)} WER={fmt(w)} F1={fmt(f1)}")
+            print(f"CER={fmt(c)}  WER={fmt(w)}  F1={fmt(f1)}")
 
     print_summary(results_by_engine)
 

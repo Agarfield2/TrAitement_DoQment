@@ -23,6 +23,9 @@ pypdfium2>=4.20
 pytesseract>=0.3.10
 opencv-python>=4.10.0
 
+# docTR — deep-learning OCR engine (benchmark: Comparaison_OCR.py).
+python-doctr[torch]>=0.8
+
 # Pipeline 2 — visual encoder.
 colpali-engine[interpretability]>=0.3.10
 
