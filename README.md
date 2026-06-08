@@ -15,7 +15,7 @@ Système de gestion documentaire local : on dépose des PDF ou images, on pose u
 | Représentation | Texte OCR → embeddings MPNet 768d | Image de page → embeddings visuels ColQwen2 |
 | Index | FAISS HNSW | Qdrant (local-path) |
 | Génération | **Ollama** + `mistral:7b-instruct` | **Ollama** + `qwen2.5vl:7b` |
-| OCR requis | Oui (Tesseract ou annotations) | Non |
+| OCR requis | Oui (**docTR** par défaut, ou Tesseract / annotations) | Non |
 
 ```
 scripts/phase1.py {ingest, doc, db}    ← pipeline textuel
@@ -42,7 +42,8 @@ curl -fsSL https://ollama.com/install.sh | sh
 ollama pull mistral:7b-instruct
 ollama pull qwen2.5vl:7b           # ~5 Go, uniquement si Pipeline 2
 
-# 3. Tesseract (Pipeline 1 sans annotations SROIE).
+# 3. OCR Pipeline 1 : docTR (moteur par défaut) est installé par requirements.txt.
+#    Tesseract n'est requis que si vous forcez --ocr-engine tesseract :
 sudo dnf install tesseract tesseract-langpack-fra tesseract-langpack-eng
 # OU :  sudo apt install tesseract-ocr tesseract-ocr-fra tesseract-ocr-eng
 
@@ -69,6 +70,21 @@ data/SROIE-Dataset_v2/
     └── entities/   ← JSON ground-truth {company, date, address, total}
 ```
 
+**DocVQA** (évaluation Phase 1/2 — Task-1 single-page + Task-3 infographics) : décompressez sous `data/DocVQA/` :
+
+```
+data/DocVQA/
+├── Task-1_Single-Page-Document-Visual-Question-Answering/
+│   ├── Annotations/   ← <split>_v1.0_withQT.json (questions + réponses)
+│   ├── Images/        ← .png
+│   └── OCR/           ← .json (OCR fourni, optionnel)
+└── Task-3_Infographics-VQA/
+    ├── Annotations/   ← infographicsVQA_<split>_v1.0_withQT.json
+    ├── Images/        ← .jpeg
+    └── OCR/           ← .json
+```
+> Le split `test` n'a pas de réponses publiques → évaluer sur `val` (défaut) ou `train`.
+
 **M3DocVQA** (Pipeline 2, benchmark optionnel) : <https://huggingface.co/datasets/JaehyeongJung/m3docvqa>
 
 **Vos PDF / images** (Pipeline 2) : déposez-les dans `data/raw/`.
@@ -81,8 +97,11 @@ data/SROIE-Dataset_v2/
 # Indexer SROIE-Dataset_v2 — pointer sur le dossier racine suffit.
 python scripts/phase1.py ingest --dir data/SROIE-Dataset_v2
 
-# Pour les images sans annotation box/, activer Tesseract :
-python scripts/phase1.py ingest --dir data/SROIE-Dataset_v2 --tesseract
+# Pour les images sans annotation box/, activer l'OCR (docTR par défaut) :
+python scripts/phase1.py ingest --dir data/SROIE-Dataset_v2 --ocr
+
+# Forcer Tesseract au lieu de docTR :
+python scripts/phase1.py ingest --dir data/SROIE-Dataset_v2 --ocr --ocr-engine tesseract
 
 # Question contre toute la base.
 python scripts/phase1.py db --question "What is the total amount?"
@@ -94,7 +113,7 @@ python scripts/phase1.py doc \
     --annotation "data/SROIE-Dataset_v2/test/box/X51005268420.txt"
 ```
 
-L'annotation `--annotation` est facultative ; sans elle, Tesseract OCR tourne automatiquement sur l'image.
+L'annotation `--annotation` est facultative ; sans elle, l'OCR (docTR par défaut, sinon Tesseract via `--ocr-engine tesseract`) tourne automatiquement sur l'image.
 
 ---
 
@@ -113,26 +132,32 @@ python scripts/phase2.py doc --file path/to/invoice.pdf --question "..."
 
 ---
 
-## Évaluation de la précision (SROIE-Dataset_v2)
+## Évaluation de la précision (SROIE + DocVQA)
 
-Le script `scripts/ocr_eval_batch.py` mesure la précision d'extraction sur chaque reçu du dataset. Pour chaque reçu, il pose trois questions (company, total, date) et vérifie que le modèle répond correctement en comparant avec la ground-truth `entities/`.
+Le script `scripts/ocr_eval_batch.py` mesure la précision des Phases 1 et 2 sur deux jeux de données, choisis via `--dataset-type` :
+
+- **`sroie`** (défaut) — pour chaque reçu, trois questions fixes (company, total, date) comparées à la ground-truth `entities/`.
+- **`docvqa`** — questions libres (Task-1 + Task-3) comparées aux réponses de référence ; métrique **ANLS** (standard DocVQA) en plus du verdict CORRECT/PARTIEL/INCORRECT.
+
+L'OCR de la Phase 1 utilise **docTR par défaut** (comme le reste du projet) ; `--ocr-engine tesseract` rétablit Tesseract.
 
 Le flag `--pipeline` choisit le modèle évalué :
 
 | `--pipeline` | OCR | Modèle d'extraction | Modèle juge |
 |---|---|---|---|
-| `phase1` | Tesseract | `--ollama-model` (Mistral) | `--ollama-model` (Mistral) |
+| `phase1` | **docTR** (défaut) ou Tesseract | `--ollama-model` (Mistral) | `--ollama-model` (Mistral) |
 | `phase2` | **aucun** — image directe | `--vision-model` (Qwen2.5-VL) | `--ollama-model` (Mistral) |
 
 ```bash
-# ── Phase 1 (Tesseract + Mistral) ──────────────────────────────────────────
+# ════════════════════════ SROIE (défaut) ════════════════════════
+# ── Phase 1 (docTR + Mistral) ──────────────────────────────────────────────
 python scripts/ocr_eval_batch.py \
     --pipeline phase1 \
     --dataset  data/SROIE-Dataset_v2 \
     --split    test \
     --out      data/eval/results_phase1.json
 
-# ── Phase 2 (image → Qwen2.5-VL, pas de Tesseract) ─────────────────────────
+# ── Phase 2 (image → Qwen2.5-VL, pas d'OCR) ────────────────────────────────
 python scripts/ocr_eval_batch.py \
     --pipeline phase2 \
     --dataset  data/SROIE-Dataset_v2 \
@@ -145,13 +170,38 @@ python scripts/ocr_eval_batch.py \
     --dataset  data/SROIE-Dataset_v2 --split test \
     --max-docs 10
 
-# ── Phase 1 avec annotations box/ (bypass Tesseract, évalue extraction seule)
+# ── Phase 1 avec annotations box/ (bypass OCR, évalue extraction seule) ──────
 python scripts/ocr_eval_batch.py \
     --pipeline phase1 --use-box-annotations \
     --dataset  data/SROIE-Dataset_v2 --split test
+
+# ── Forcer Tesseract au lieu de docTR ───────────────────────────────────────
+python scripts/ocr_eval_batch.py \
+    --pipeline phase1 --ocr-engine tesseract \
+    --dataset  data/SROIE-Dataset_v2 --split test
+
+# ════════════════════════ DocVQA ════════════════════════
+# ── Phase 1, Task-1 + Task-3, split val (réponses publiques) ────────────────
+python scripts/ocr_eval_batch.py \
+    --dataset-type docvqa \
+    --dataset      data/DocVQA \
+    --task         both \
+    --split        val \
+    --pipeline     phase1 \
+    --out          data/eval/results_docvqa_phase1.json
+
+# ── Phase 2 (vision), une seule tâche ───────────────────────────────────────
+python scripts/ocr_eval_batch.py \
+    --dataset-type docvqa --dataset data/DocVQA \
+    --task task1 --split val --pipeline phase2
+
+# ── Phase 1 en réutilisant l'OCR/ fourni au lieu de docTR ───────────────────
+python scripts/ocr_eval_batch.py \
+    --dataset-type docvqa --dataset data/DocVQA \
+    --task both --split val --pipeline phase1 --use-provided-ocr
 ```
 
-**Métriques rapportées** :
+**Métriques rapportées (SROIE)** :
 
 | Métrique | Description |
 |---|---|
@@ -159,11 +209,22 @@ python scripts/ocr_eval_batch.py \
 | Score pondéré | CORRECT=1 pt, PARTIEL=0.5 pt, INCORRECT=0 pt — sur N×3 pts |
 | Par champ | Taux CORRECT / PARTIEL / INCORRECT / NOT FOUND par field |
 
-**Verdicts** :
-- `CORRECT` — valeur extraite correspond exactement à la référence
-- `PARTIEL` — company : ≥ 60 % des mots-clés présents
-- `INCORRECT` — valeur extraite incorrecte
-- `NOT FOUND` — le modèle n'a pas trouvé l'information
+**Métriques rapportées (DocVQA)** :
+
+| Métrique | Description |
+|---|---|
+| ANLS | Average Normalized Levenshtein Similarity (seuil `--anls-threshold`, défaut 0.5) — métrique standard DocVQA |
+| Exactitude | Questions au verdict CORRECT / total |
+| Score pondéré | CORRECT=1 pt, PARTIEL=0.5 pt — sur N pts |
+| Par tâche | ANLS et exactitude détaillés pour task1 / task3 (si `--task both`) |
+
+**Verdicts** (auto déterministe → affiné par le juge LLM, fusion la plus favorable) :
+- `CORRECT` — réponse équivalente à la référence
+- `PARTIEL` — partiellement correcte (SROIE company : ≥ 60 % des mots-clés ; DocVQA : ANLS ≥ seuil)
+- `INCORRECT` — réponse incorrecte
+- `NOT FOUND` — le modèle n'a pas trouvé l'information (SROIE)
+
+> Le **juge** est le modèle texte (Mistral) consulté quand le verdict automatique n'est pas déjà CORRECT, pour rattraper les équivalences de sens que la distance de caractères rate (ex. `2` vs `two`). L'ANLS, lui, reste calculé indépendamment du juge.
 
 ---
 
@@ -175,6 +236,7 @@ Tout vit dans `doqment/settings.py` — une seule dataclass `Settings` avec des 
 export DOQMENT_OLLAMA_HOST=http://localhost:11434
 export DOQMENT_OLLAMA_TEXT_MODEL=mistral:7b-instruct
 export DOQMENT_OLLAMA_VISION_MODEL=qwen2.5vl:7b
+export DOQMENT_OCR_ENGINE=doctr            # OCR Phase 1 : "doctr" (défaut) ou "tesseract"
 export DOQMENT_COLQWEN_DEVICE=cuda:0       # ou "cpu"
 export DOQMENT_COLQWEN_DTYPE=bfloat16
 ```
@@ -189,7 +251,7 @@ TrAitement-DoQment/
 ├── pipeline1.py               ← canonique coéquipier 1 (intouché)
 ├── pipeline_rag2.py           ← canonique coéquipier 2 (intouché)
 ├── pdf_ocr.py                 ← canonique coéquipier 2 (intouché)
-├── Comparaison_OCR.py         ← canonique coéquipier 2 (intouché)
+├── Comparaison_OCR.py         ← benchmark OCR coéquipier 2 (adapté : docTR + Tesseract)
 │
 ├── app.py                     ← interface Streamlit (3 vues)
 ├── conftest.py
@@ -198,7 +260,7 @@ TrAitement-DoQment/
 ├── doqment/                   ← TOUT notre code, un seul package plat
 │   ├── settings.py            ← config (Settings dataclass)
 │   ├── llm.py                 ← client Ollama (texte + vision)
-│   ├── ocr.py                 ← wrapper Tesseract
+│   ├── ocr.py                 ← wrapper OCR (docTR par défaut + Tesseract)
 │   ├── phase1.py              ← Pipeline 1 (ingest_directory, ask_document, ask_database)
 │   ├── phase2.py              ← Pipeline 2 (idem, multimodal)
 │   ├── phase2_store.py        ← ColQwen2 + Qdrant + SQLite + rasterize
@@ -206,7 +268,8 @@ TrAitement-DoQment/
 │
 ├── scripts/
 │   ├── phase1.py              ← CLI Pipeline 1
-│   └── phase2.py              ← CLI Pipeline 2
+│   ├── phase2.py              ← CLI Pipeline 2
+│   └── ocr_eval_batch.py      ← évaluation précision Phase 1/2 (SROIE + DocVQA)
 │
 ├── tests/                     ← 61 tests utiles, exécutés en <3 secondes
 │   ├── test_settings.py
@@ -222,7 +285,7 @@ TrAitement-DoQment/
 
 ## Dépannage
 
-**`tesseract is not installed or it's not in your PATH`** — Installer le binaire Tesseract (voir Démarrage rapide). Sans Tesseract, Pipeline 1 mode `doc` marche uniquement si vous fournissez l'annotation ICDAR jumelle.
+**`tesseract is not installed or it's not in your PATH`** — N'arrive que si vous forcez `--ocr-engine tesseract` (ou `DOQMENT_OCR_ENGINE=tesseract`). L'OCR par défaut étant docTR (installé par `requirements.txt`), Pipeline 1 fonctionne sans le binaire Tesseract. Sinon, installez Tesseract (voir Démarrage rapide) ou fournissez l'annotation ICDAR jumelle.
 
 **`Connection refused` quand le pipeline appelle Ollama** — Démarrer le démon : `ollama serve` (souvent automatique après l'installation). Vérifier les modèles tirés : `ollama list`.
 
@@ -232,7 +295,7 @@ TrAitement-DoQment/
 
 **`Could not load library with AVX2 support` (FAISS)** — Le fallback générique s'active. Fonctionnel, performance légèrement plus basse.
 
-**`AttributeError: 'OCREngine' object has no attribute '_model'`** — Bug du fichier canonique `ingestion.py:82-99`. Le mode `doc` Pipeline 1 contourne automatiquement en passant par `doqment/ocr.py` (Tesseract). Si vous voyez l'erreur, c'est que vous tournez une version antérieure — `pytest` doit afficher 61 passed.
+**`AttributeError: 'OCREngine' object has no attribute '_model'`** — Bug du fichier canonique `ingestion.py:82-99`. Le mode `doc` Pipeline 1 contourne automatiquement en passant par `doqment/ocr.py` (docTR par défaut, ou Tesseract). Si vous voyez l'erreur, c'est que vous tournez une version antérieure — `pytest` doit afficher 61 passed.
 
 **`ResponseError: model requires more system memory (12.5 GiB) than is available (...)`** — Qwen2.5-VL 7B requiert ~12,5 Go de RAM en CPU-only (~5 Go en GPU CUDA). Libérer de la RAM (fermer le navigateur, IDE, etc.) ou exécuter sur une machine équipée. Le projet est figé sur ce modèle ; ne pas le remplacer.
 
@@ -245,7 +308,7 @@ L'encodage est ~50× plus lent qu'avec GPU (compter ~30 s par page) — réalist
 
 ---
 
-## Cinq fichiers canoniques cohabitent
+## Quatre fichiers canoniques cohabitent
 
 Les coéquipiers ont livré du code Python qu'on conserve **byte-identique aux originaux** :
 
@@ -254,7 +317,8 @@ Les coéquipiers ont livré du code Python qu'on conserve **byte-identique aux o
 | `ingestion.py` + `pipeline1.py` | Indexation canonique SROIE (coéquipier 1) | `doqment/phase1.py` |
 | `pipeline_rag2.py` | RAG complet avec REPL (coéquipier 2) | usage standalone |
 | `pdf_ocr.py` | OCR Tesseract autonome (coéquipier 2) | extraction texte hors RAG |
-| `Comparaison_OCR.py` | Benchmark Tesseract sur SROIE-Dataset_v2 (coéquipier 2) | diagnostic d'OCR |
+
+`Comparaison_OCR.py` (benchmark OCR du coéquipier 2) a été **adapté** depuis : support docTR ajouté en plus de Tesseract, Surya/Kraken retirés. Il n'est donc plus byte-identique à l'original.
 
 ---
 
@@ -262,6 +326,6 @@ Les coéquipiers ont livré du code Python qu'on conserve **byte-identique aux o
 
 - **L'index FAISS HNSW** (Pipeline 1) ne supporte pas la suppression individuelle — il faut réindexer pour retirer un document.
 - **`ingestion.py:32`** : `BoundingBox.ymax` contient un bug (`max(self.x1, self.y2, self.y3, self.y4)` au lieu de `self.y1`). Contourné dans nos tests.
-- **`ingestion.py:82-99`** : `OCREngine._load()` référence `self._model` qui n'existe pas. Contourné par `doqment/ocr.py` (Tesseract).
+- **`ingestion.py:82-99`** : `OCREngine._load()` référence `self._model` qui n'existe pas. Contourné par `doqment/ocr.py` (docTR par défaut, ou Tesseract).
 - **Pipeline 2 demande de la RAM** — Qwen2.5-VL 7B en CPU-only consomme ~12,5 Go (≈ 5 Go avec GPU CUDA). ColQwen2 ajoute ~6 Go. Sur machine ≤ 16 Go libre, fermer les autres applications avant de lancer `db`. Ce dimensionnement est assumé.
 - **La Loi 25** — l'exécution locale ne couvre que l'aspect *technique*. Le consentement, le registre et le RPRP restent à instrumenter au niveau organisationnel.
