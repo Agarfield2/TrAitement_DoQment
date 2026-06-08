@@ -67,7 +67,8 @@ _REFUSAL = "I do not have this information in the provided documents."
 
 ### Ingestion ###
 
-def ingest_directory(task1, task2=None, *, max_docs=None, use_tesseract=False,
+def ingest_directory(task1, task2=None, *, max_docs=None, use_ocr=False,
+                     ocr_engine=None,
                      image_extensions=(".jpg", ".jpeg", ".png")):
     """
     Builds the FAISS index from a folder of SROIE-style documents.
@@ -85,17 +86,21 @@ def ingest_directory(task1, task2=None, *, max_docs=None, use_tesseract=False,
     layout — the SROIE corpus mixes both kinds of .txt files in
     several subfolders.
 
-    Files lacking an annotation are either OCR'd via Tesseract
-    (`use_tesseract=True`) or silently skipped. We never trigger the
-    canonical PaddleOCR path because it's broken (see ingestion.py:82-99).
+    Files lacking an annotation are either OCR'd (`use_ocr=True`) or
+    silently skipped. The OCR engine is docTR by default (see
+    Settings.ocr_engine) ; pass `ocr_engine="tesseract"` to switch. We
+    never trigger the canonical PaddleOCR path because it's broken
+    (see ingestion.py:82-99).
 
     Args:
         task1 (str | Path): Root folder, scanned recursively.
         task2 (str | Path, optional): Explicit folder of entity JSONs.
             Every .txt inside is forced into the entity bucket.
         max_docs (int, optional): Cap on number of documents indexed.
-        use_tesseract (bool): Run Tesseract OCR on images without
-            annotation. Otherwise they are skipped.
+        use_ocr (bool): Run OCR on images without annotation.
+            Otherwise they are skipped.
+        ocr_engine (str, optional): OCR engine to use ("doctr" or
+            "tesseract"). None uses Settings.ocr_engine (default "doctr").
         image_extensions (tuple): File extensions recognised as images.
 
     Returns:
@@ -107,6 +112,7 @@ def ingest_directory(task1, task2=None, *, max_docs=None, use_tesseract=False,
     from tqdm import tqdm
 
     settings = load_settings()
+    ocr_engine_name = ocr_engine or getattr(settings, "ocr_engine", "doctr")
     task1 = Path(task1)
     task2 = Path(task2) if task2 else None
 
@@ -140,8 +146,9 @@ def ingest_directory(task1, task2=None, *, max_docs=None, use_tesseract=False,
         if ann_path is not None:
             lines = _ing.OCREngine.from_sroie_annotation(ann_path)
             n_annot += 1
-        elif use_tesseract:
-            lines = _ocr.ocr_image(_ing.load_image(img_path))
+        elif use_ocr:
+            lines = _ocr.ocr_image(_ing.load_image(img_path),
+                                   engine=ocr_engine)
             n_ocr += 1
         else:
             n_skipped += 1
@@ -162,14 +169,14 @@ def ingest_directory(task1, task2=None, *, max_docs=None, use_tesseract=False,
         all_passages.extend(passages)
 
     print(f"  - {n_annot} from annotations, "
-          f"{n_ocr} via Tesseract, {n_skipped} skipped.")
+          f"{n_ocr} via OCR ({ocr_engine_name}), {n_skipped} skipped.")
 
     if not all_passages:
         return {
             "total_passages": 0,
             "total_documents": 0,
             "from_annotations": n_annot,
-            "from_tesseract": n_ocr,
+            "from_ocr": n_ocr,
             "skipped": n_skipped,
         }
 
@@ -191,7 +198,7 @@ def ingest_directory(task1, task2=None, *, max_docs=None, use_tesseract=False,
         "total_passages": len(all_passages),
         "total_documents": docs,
         "from_annotations": n_annot,
-        "from_tesseract": n_ocr,
+        "from_ocr": n_ocr,
         "skipped": n_skipped,
     }
 

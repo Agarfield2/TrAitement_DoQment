@@ -52,10 +52,17 @@ def _render_phase1():
         max_docs = st.number_input(
             "Cap on documents (0 = no cap)", min_value=0, value=0, step=10,
         )
-        use_tesseract = st.checkbox(
-            "Run Tesseract OCR on images without annotation "
+        use_ocr = st.checkbox(
+            "Run OCR on images without annotation "
             "(otherwise they are skipped)",
             value=False,
+        )
+        ocr_engine = st.selectbox(
+            "OCR engine",
+            options=["doctr", "tesseract"],
+            index=0,
+            help="docTR (default) is more accurate on receipts ; "
+                 "Tesseract is the classic binary path.",
         )
 
     if not st.button("🚀 Build the Phase 1 index", type="primary"):
@@ -73,7 +80,8 @@ def _render_phase1():
                 task1=root,
                 task2=task2 or None,
                 max_docs=int(max_docs) if max_docs else None,
-                use_tesseract=use_tesseract,
+                use_ocr=use_ocr,
+                ocr_engine=ocr_engine,
             )
         except Exception as exc:
             st.error(f"Ingestion failed : {exc}")

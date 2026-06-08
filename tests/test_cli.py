@@ -12,8 +12,8 @@ from typer.testing import CliRunner
 
 ### scripts/phase1.py ###
 
-def test_phase1_ingest_use_tesseract_is_a_bool_flag():
-    """No `--tesseract` flag → use_tesseract is the boolean `False`."""
+def test_phase1_ingest_use_ocr_is_a_bool_flag():
+    """No `--ocr` flag → use_ocr is the boolean `False`."""
 
     import scripts.phase1 as cli
 
@@ -35,10 +35,10 @@ def test_phase1_ingest_use_tesseract_is_a_bool_flag():
 
     assert result.exit_code == 0, result.output
     # The actual value must be the boolean False — not "False".
-    assert captured["use_tesseract"] is False
+    assert captured["use_ocr"] is False
 
 
-def test_phase1_ingest_with_tesseract_flag_sets_true():
+def test_phase1_ingest_with_ocr_flag_sets_true():
     import scripts.phase1 as cli
 
     runner = CliRunner()
@@ -52,12 +52,12 @@ def test_phase1_ingest_with_tesseract_flag_sets_true():
     real = phase1_mod.ingest_directory
     phase1_mod.ingest_directory = _shim
     try:
-        result = runner.invoke(cli.app, ["ingest", "--tesseract"])
+        result = runner.invoke(cli.app, ["ingest", "--ocr"])
     finally:
         phase1_mod.ingest_directory = real
 
     assert result.exit_code == 0, result.output
-    assert captured["use_tesseract"] is True
+    assert captured["use_ocr"] is True
 
 
 def test_phase1_doc_top_k_is_int():

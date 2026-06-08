@@ -38,6 +38,8 @@ class Settings:
         colqwen_model: Hugging Face name of the ColQwen2 encoder.
         colqwen_device: Torch device for ColQwen2 ("cuda:0", "cpu").
         colqwen_dtype: Torch dtype for ColQwen2 ("bfloat16", "float16", "float32").
+        ocr_engine: Default OCR engine for Pipeline 1's fallback,
+            "doctr" (default) or "tesseract".
         retrieve_k: Pages retrieved before sending to the VLM (Pipeline 2).
         generate_k: Pages actually sent to the VLM (Pipeline 2).
     """
@@ -56,6 +58,12 @@ class Settings:
     colqwen_model: str = os.environ.get("DOQMENT_COLQWEN_MODEL", "vidore/colqwen2-v1.0")
     colqwen_device: str = os.environ.get("DOQMENT_COLQWEN_DEVICE", "cpu")
     colqwen_dtype: str = os.environ.get("DOQMENT_COLQWEN_DTYPE", "bfloat16")
+
+    # OCR engine for Pipeline 1's fallback (images without a SROIE
+    # annotation). "doctr" (default) is a deep-learning recognizer, far
+    # more accurate on receipts ; "tesseract" keeps the classic binary
+    # path. Override via DOQMENT_OCR_ENGINE.
+    ocr_engine: str = os.environ.get("DOQMENT_OCR_ENGINE", "doctr")
 
     # Tesseract binary — hardcoded to /usr/bin/tesseract because that's
     # where Fedora, Debian and Ubuntu put it. Override via the env var

@@ -43,10 +43,15 @@ def ingest(
     max_docs: Optional[int] = typer.Option(
         None, help="Cap on number of documents indexed.",
     ),
-    use_tesseract: bool = typer.Option(
-        False, "--tesseract/--no-tesseract",
-        help="Run Tesseract OCR on images that lack a SROIE annotation. "
+    use_ocr: bool = typer.Option(
+        False, "--ocr/--no-ocr",
+        help="Run OCR on images that lack a SROIE annotation. "
              "Default : skip those images.",
+    ),
+    ocr_engine: Optional[str] = typer.Option(
+        None, "--ocr-engine",
+        help="OCR engine: 'doctr' (default) or 'tesseract'. "
+             "When omitted, uses Settings.ocr_engine.",
     ),
 ):
     """
@@ -54,7 +59,8 @@ def ingest(
     """
 
     stats = phase1.ingest_directory(
-        task1, task2, max_docs=max_docs, use_tesseract=use_tesseract,
+        task1, task2, max_docs=max_docs, use_ocr=use_ocr,
+        ocr_engine=ocr_engine,
     )
     console.print(f"[bold green]✓[/] Indexed {stats['total_passages']} passages "
                   f"from {stats['total_documents']} documents.")

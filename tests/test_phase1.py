@@ -249,13 +249,13 @@ def test_ingest_directory_uses_annotations_when_present(tmp_path, monkeypatch):
     assert ocr_called["hit"] is False
     assert stats["total_passages"] >= 1
     assert stats["from_annotations"] == 1
-    assert stats["from_tesseract"] == 0
+    assert stats["from_ocr"] == 0
     assert stats["skipped"] == 0
 
 
 def test_ingest_directory_skips_unannotated_by_default(tmp_path, monkeypatch):
     """
-    Without --tesseract, files lacking an annotation must be silently
+    Without --ocr, files lacking an annotation must be silently
     skipped (the broken canonical PaddleOCR path is never engaged).
     """
 
@@ -295,10 +295,10 @@ def test_ingest_directory_skips_unannotated_by_default(tmp_path, monkeypatch):
     assert stats["total_passages"] == 0
 
 
-def test_ingest_directory_uses_tesseract_when_requested(tmp_path, monkeypatch):
+def test_ingest_directory_uses_ocr_when_requested(tmp_path, monkeypatch):
     """
-    With --tesseract on, unannotated files go through our Tesseract
-    wrapper (never the broken canonical OCREngine).
+    With --ocr on, unannotated files go through our OCR wrapper
+    (never the broken canonical OCREngine).
     """
 
     import doqment.phase1 as phase1_mod
@@ -323,9 +323,9 @@ def test_ingest_directory_uses_tesseract_when_requested(tmp_path, monkeypatch):
         phase1_mod._ing, "FAISSIndex", _FakeFAISS,
     )
 
-    stats = phase1_mod.ingest_directory(task1, use_tesseract=True)
+    stats = phase1_mod.ingest_directory(task1, use_ocr=True)
 
-    assert stats["from_tesseract"] == 1
+    assert stats["from_ocr"] == 1
     assert stats["skipped"] == 0
     assert stats["total_passages"] >= 1
 

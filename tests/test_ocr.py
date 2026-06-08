@@ -145,7 +145,7 @@ def test_missing_pytesseract_raises_clear_error(monkeypatch):
     monkeypatch.setitem(sys.modules, "pytesseract", None)
     from doqment.ocr import ocr_image
     with pytest.raises(ImportError, match="pytesseract"):
-        ocr_image(_fake_image())
+        ocr_image(_fake_image(), engine="tesseract")
 
 
 ### Tests : Tesseract path comes from Settings ###
@@ -187,7 +187,7 @@ def test_ocr_image_pushes_settings_path_to_pytesseract(monkeypatch):
     monkeypatch.setattr(settings_mod, "load_settings", lambda: fake_settings)
 
     from doqment.ocr import ocr_image
-    ocr_image(_fake_image(), preprocess=False)
+    ocr_image(_fake_image(), engine="tesseract", preprocess=False)
 
     assert fake_module.pytesseract.tesseract_cmd == "/usr/bin/tesseract"
 
@@ -225,7 +225,7 @@ def test_ocr_image_friendly_error_when_pytesseract_cannot_invoke(monkeypatch):
 
     from doqment.ocr import ocr_image
     with pytest.raises(RuntimeError, match="/nowhere/tesseract"):
-        ocr_image(_fake_image(), preprocess=False)
+        ocr_image(_fake_image(), engine="tesseract", preprocess=False)
 
 
 def _make_settings_with(base, **overrides):
