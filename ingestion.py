@@ -457,6 +457,14 @@ class IngestionPipeline:
 
             ann_path = task1_dir / f"{stem}.txt"
 
+            # SROIE-Dataset_v2 : images dans img/, annotation box/ en
+            # dossier frere. Si elle n'est pas a cote de l'image, la
+            # chercher dans ../box/.
+            if not ann_path.exists():
+                sibling = task1_dir.parent / "box" / f"{stem}.txt"
+                if sibling.exists():
+                    ann_path = sibling
+
             ent_path = None
             if task2_dir:
                 candidate = task2_dir / f"{stem}.txt"
@@ -518,12 +526,12 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--task1",
-        default="data/SROIE2019/0325updated.task1train(626p)"
+        default="data/SROIE-Dataset_v2/train/img"
     )
 
     parser.add_argument(
         "--task2",
-        default="data/SROIE2019/0325updated.task2train(626p)"
+        default="data/SROIE-Dataset_v2/train/entities"
     )
 
     parser.add_argument(

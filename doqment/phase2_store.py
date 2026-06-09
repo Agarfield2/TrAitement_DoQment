@@ -292,7 +292,17 @@ class QdrantStore:
 
         qdrant_dir = Path(qdrant_dir)
         qdrant_dir.parent.mkdir(parents=True, exist_ok=True)
-        self.client = QdrantClient(path=str(qdrant_dir))
+        try:
+            self.client = QdrantClient(path=str(qdrant_dir))
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"Qdrant local '{qdrant_dir}' est deja verrouille. "
+                f"Causes possibles : un autre process l'utilise (autre onglet/"
+                f"instance Streamlit, `scripts/phase2.py`, notebook...), ou un "
+                f"verrou perime apres un arret brutal. Solution : fermer les "
+                f"autres process, ou — si aucun n'est actif — supprimer "
+                f"'{qdrant_dir}/.lock', puis reessayer."
+            ) from exc
         self._qmodels = qmodels
 
         if not self.client.collection_exists(self.COLLECTION):
@@ -442,6 +452,11 @@ def open_stores(settings):
     """
     Opens the Qdrant + SQLite stores and closes them at exit.
 
+    The Qdrant client is closed even if the metadata store or the body
+    raises — otherwise a leaked local client would keep the storage folder
+    locked and make every later open fail ("already accessed by another
+    instance").
+
     Args:
         settings (Settings): Project settings.
 
@@ -450,9 +465,11 @@ def open_stores(settings):
     """
 
     vec = QdrantStore(settings.phase2_qdrant_dir)
-    meta = MetadataStore(settings.phase2_metadata_db)
     try:
-        yield vec, meta
+        meta = MetadataStore(settings.phase2_metadata_db)
+        try:
+            yield vec, meta
+        finally:
+            meta.close()
     finally:
         vec.close()
-        meta.close()
