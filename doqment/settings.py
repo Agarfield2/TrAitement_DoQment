@@ -61,7 +61,7 @@ class Settings:
     phase2_raw_dir: Path = _DATA / "raw"
 
     colqwen_model: str = os.environ.get("DOQMENT_COLQWEN_MODEL", "vidore/colqwen2-v1.0")
-    colqwen_device: str = os.environ.get("DOQMENT_COLQWEN_DEVICE", "cpu")
+    colqwen_device: str = os.environ.get("DOQMENT_COLQWEN_DEVICE", "cuda:0")
     colqwen_dtype: str = os.environ.get("DOQMENT_COLQWEN_DTYPE", "bfloat16")
 
     # OCR engine for Pipeline 1's fallback (images without a SROIE
