@@ -335,19 +335,16 @@ def _generate_answer(question, sources, settings):
         return Answer(text=_REFUSAL, sources=[], cited=[])
 
     images = [_store.load_page_image(s.image_path) for s in sources]
-    result = _llm.generate_vision(
+    text = _llm.generate_vision(
         prompt=question,
         images=images,
         model=settings.ollama_vision_model,
         host=settings.ollama_host,
         keep_alive=settings.ollama_keep_alive,
         num_ctx=settings.ollama_num_ctx,
-    )
+        image_max_side=settings.vlm_image_max_side,
+    ) or _REFUSAL
 
-    cited = [
-        sources[i - 1]
-        for i in result.cited_pages
-        if 1 <= i <= len(sources)
-    ]
-    text = result.answer or _REFUSAL
-    return Answer(text=text, sources=sources, cited=cited)
+    # Le modèle ne s'auto-cite plus : les pages envoyées au VLM (déjà les
+    # mieux classées par Qdrant) constituent les sources qui appuient la réponse.
+    return Answer(text=text, sources=sources, cited=sources)

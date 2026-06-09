@@ -2,61 +2,39 @@
 Tests for the Ollama LLM client.
 
 We do not call Ollama in tests — they would need a daemon and a
-~5 Go model. Instead we exercise the response-parsing layer, which
-is where the bugs would actually live.
+~5 Go model. Instead we stub the client and exercise the thin
+request/response layer.
 """
-
-import json
 
 import pytest
 
 from doqment import llm
 
 
-### Tests : VLM JSON parsing ###
+### Tests : vision generation (no JSON envelope) ###
 
-def test_parse_valid_json_extracts_answer_and_cites():
-    raw = json.dumps({"answer": "Le total est 42.50.", "cited_pages": [1, 3]})
-    result = llm._parse_vlm_response(raw, n_pages=5)
-    assert result.answer == "Le total est 42.50."
-    assert result.cited_pages == [1, 3]
+def test_generate_vision_returns_model_prose(monkeypatch):
+    """generate_vision returns the model's text content, stripped, with no
+    JSON format constraint imposed on the model."""
+    from PIL import Image
 
+    captured = {}
 
-def test_parse_drops_out_of_range_indices():
-    raw = json.dumps({"answer": "x", "cited_pages": [0, 1, 6, -1, 3]})
-    result = llm._parse_vlm_response(raw, n_pages=5)
-    assert result.cited_pages == [1, 3]
+    class FakeClient:
+        def chat(self, **kwargs):
+            captured.update(kwargs)
+            return {"message": {"content": "  Le total est 42,50.  "}}
 
+    monkeypatch.setattr(llm, "_client", lambda host: FakeClient())
 
-def test_parse_dedups_repeated_indices():
-    raw = json.dumps({"answer": "x", "cited_pages": [1, 1, 2, 2, 1]})
-    result = llm._parse_vlm_response(raw, n_pages=5)
-    assert result.cited_pages == [1, 2]
-
-
-def test_parse_handles_non_integer_indices():
-    raw = json.dumps({"answer": "x", "cited_pages": ["1", "two", None, 2]})
-    result = llm._parse_vlm_response(raw, n_pages=5)
-    assert result.cited_pages == [1, 2]
-
-
-def test_parse_handles_missing_cited_pages_key():
-    raw = json.dumps({"answer": "ok"})
-    result = llm._parse_vlm_response(raw, n_pages=5)
-    assert result.cited_pages == []
-
-
-def test_parse_handles_invalid_json_gracefully():
-    raw = "I am not JSON {{{"
-    result = llm._parse_vlm_response(raw, n_pages=5)
-    assert result.answer == raw
-    assert result.cited_pages == []
-
-
-def test_parse_handles_non_list_cited_pages():
-    raw = json.dumps({"answer": "x", "cited_pages": "not a list"})
-    result = llm._parse_vlm_response(raw, n_pages=5)
-    assert result.cited_pages == []
+    out = llm.generate_vision(
+        prompt="Quel est le total ?",
+        images=[Image.new("RGB", (10, 10))],
+        model="qwen2.5vl:7b", host="http://x",
+    )
+    assert out == "Le total est 42,50."
+    assert "format" not in captured            # plus d'enveloppe JSON forcée
+    assert captured["options"]["num_ctx"] >= 1  # garde-fous contexte toujours là
 
 
 ### Tests : image encoding ###
@@ -79,6 +57,19 @@ def test_image_to_b64_converts_non_rgb():
         img = Image.new(mode, (10, 10))
         encoded = llm._image_to_b64(img)
         assert isinstance(encoded, str) and len(encoded) > 0
+
+
+def test_image_to_b64_downscales_to_max_side():
+    """max_side caps the longest dimension while keeping aspect ratio."""
+    import base64
+    import io
+    from PIL import Image
+
+    img = Image.new("RGB", (2000, 1000), color="blue")
+    encoded = llm._image_to_b64(img, max_side=1024)
+    out = Image.open(io.BytesIO(base64.b64decode(encoded)))
+    assert max(out.size) == 1024
+    assert out.size == (1024, 512)
 
 
 ### Tests : missing dependency ###

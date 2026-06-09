@@ -11,12 +11,6 @@ Requires :  pip install ollama  (also installs httpx).
 
 import base64
 import io
-import json
-import logging
-from dataclasses import dataclass
-
-
-logger = logging.getLogger(__name__)
 
 
 ### Public API ###
@@ -45,29 +39,16 @@ def generate_text(prompt, *, model, host, keep_alive="5m"):
     return response["message"]["content"].strip()
 
 
-@dataclass(frozen=True)
-class VLMAnswer:
+def generate_vision(prompt, images, *, model, host, keep_alive="5m",
+                    num_ctx=8192, image_max_side=1024):
     """
-    Structured answer from the vision model.
+    Calls Ollama vision generation with images attached and returns the
+    model's plain-text answer.
 
-    Attributes:
-        answer: The natural-language answer.
-        cited_pages: Indices (1-based) of the input pages the model cited.
-        raw: The raw JSON content returned by the model.
-    """
-
-    answer: str
-    cited_pages: list
-    raw: str
-
-
-def generate_vision(prompt, images, *, model, host, keep_alive="5m", num_ctx=8192):
-    """
-    Calls Ollama vision generation with images attached.
-
-    The system prompt forces a JSON envelope with `answer` and
-    `cited_pages` so the caller can robustly extract the answer and
-    the indices of the pages the model actually used.
+    No JSON envelope is forced on the model : citations are handled by the
+    caller (the retrieved pages sent in are the evidence). Forcing a JSON
+    grammar made the 7B VLM degenerate under multi-image prompts, so we let
+    it answer in natural language instead.
 
     Args:
         prompt (str): The user question.
@@ -75,23 +56,21 @@ def generate_vision(prompt, images, *, model, host, keep_alive="5m", num_ctx=819
         model (str): Ollama vision model tag.
         host (str): Ollama daemon URL.
         keep_alive (str): How long to keep the model warm.
+        num_ctx (int): Ollama context window (token budget).
+        image_max_side (int): Longest-side pixel cap per image.
 
     Returns:
-        VLMAnswer: Structured answer with extracted cited pages.
+        str: The model's answer text (empty string if it returned nothing).
     """
 
     client = _client(host)
-    encoded = [_image_to_b64(img) for img in images]
+    encoded = [_image_to_b64(img, max_side=image_max_side) for img in images]
 
     system = (
-        "You are a careful document assistant. The user provides one or "
-        "more page images, numbered 1..N in the order they appear. "
-        "Reply with ONE JSON object only, with this exact shape :\n"
-        '{"answer": "...", "cited_pages": [1, 2]}\n'
-        "Use cited_pages to list the 1-based indices of the pages that "
-        "support your answer. If no page contains the answer, return "
-        '{"answer": "Information non trouvée dans les documents fournis.", '
-        '"cited_pages": []}.'
+        "You are a careful document assistant. The user provides one or more "
+        "page images. Answer the question using ONLY what is visible in those "
+        "pages, concisely and in the user's language. If the answer is not "
+        "present in the pages, say so plainly."
     )
 
     response = client.chat(
@@ -101,7 +80,6 @@ def generate_vision(prompt, images, *, model, host, keep_alive="5m", num_ctx=819
             {"role": "user", "content": prompt, "images": encoded},
         ],
         keep_alive=keep_alive,
-        format="json",
         options={
             "temperature": 0.0,
             # Fenêtre assez large pour contenir plusieurs images sans troncature
@@ -113,8 +91,7 @@ def generate_vision(prompt, images, *, model, host, keep_alive="5m", num_ctx=819
         },
     )
 
-    raw = response["message"]["content"].strip()
-    return _parse_vlm_response(raw, n_pages=len(images))
+    return response["message"]["content"].strip()
 
 
 ### Helpers ###
@@ -140,53 +117,24 @@ def _client(host):
     return ollama.Client(host=host)
 
 
-def _image_to_b64(image):
+def _image_to_b64(image, max_side=None):
     """
     Encodes a PIL image as base64 PNG, the format Ollama expects.
 
     Args:
         image (PIL.Image.Image): The page image.
+        max_side (int | None): If set, downscale so the longest side is at
+            most this many pixels. Fewer pixels = far fewer vision tokens,
+            which keeps multi-image prompts inside the model context.
 
     Returns:
         str: Base64-encoded PNG bytes.
     """
 
+    image = image.convert("RGB")
+    if max_side and max(image.size) > max_side:
+        image = image.copy()
+        image.thumbnail((max_side, max_side))   # preserves aspect ratio
     buf = io.BytesIO()
-    image.convert("RGB").save(buf, format="PNG")
+    image.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("ascii")
-
-
-def _parse_vlm_response(raw, *, n_pages):
-    """
-    Parses Ollama's JSON envelope, defensively.
-
-    Args:
-        raw (str): The raw content string returned by the model.
-        n_pages (int): Number of input pages, for citation validation.
-
-    Returns:
-        VLMAnswer: Validated answer with cited_pages in [1, n_pages].
-    """
-
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        logger.warning("VLM did not return valid JSON, treating raw as answer.")
-        return VLMAnswer(answer=raw, cited_pages=[], raw=raw)
-
-    answer = str(payload.get("answer", "")).strip()
-    cited = payload.get("cited_pages", [])
-
-    # Defensively coerce to integers in 1..n_pages, dedup, preserve order.
-    valid = []
-    seen = set()
-    for item in cited if isinstance(cited, list) else []:
-        try:
-            idx = int(item)
-        except (TypeError, ValueError):
-            continue
-        if 1 <= idx <= n_pages and idx not in seen:
-            valid.append(idx)
-            seen.add(idx)
-
-    return VLMAnswer(answer=answer, cited_pages=valid, raw=raw)

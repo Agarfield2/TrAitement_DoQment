@@ -31,6 +31,7 @@ class Settings:
         ollama_vision_model: Model tag used for Pipeline 2 multimodal answers.
         ollama_keep_alive: How long Ollama keeps the model warm in RAM/VRAM.
         ollama_num_ctx: Ollama context window for the VLM (token budget).
+        vlm_image_max_side: Longest-side pixel cap for images sent to the VLM.
         phase1_index_dir: Directory holding FAISS index + metadata (Pipeline 1).
         phase2_qdrant_dir: Directory holding the local Qdrant database (Pipeline 2).
         phase2_metadata_db: SQLite file holding Pipeline 2 page metadata.
@@ -52,7 +53,10 @@ class Settings:
     # Fenêtre de contexte Ollama pour le VLM. Plusieurs images de pages
     # consomment beaucoup de tokens visuels ; une fenêtre trop petite tronque
     # l'entrée et fait dégénérer Qwen (boucle de tokens <|im_start|>).
-    ollama_num_ctx: int = int(os.environ.get("DOQMENT_OLLAMA_NUM_CTX", "8192"))
+    ollama_num_ctx: int = int(os.environ.get("DOQMENT_OLLAMA_NUM_CTX", "12288"))
+    # Plus grand côté (px) des images envoyées au VLM. Réduire = beaucoup moins
+    # de tokens visuels par image, donc plusieurs pages tiennent dans num_ctx.
+    vlm_image_max_side: int = int(os.environ.get("DOQMENT_VLM_IMAGE_MAX_SIDE", "1024"))
 
     phase1_index_dir: Path = _DATA / "processed"
     phase2_qdrant_dir: Path = _DATA / "qdrant"
