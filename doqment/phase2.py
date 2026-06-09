@@ -19,6 +19,7 @@ from pathlib import Path
 from doqment import llm as _llm
 from doqment import phase2_store as _store
 from doqment.settings import load_settings
+from tqdm import tqdm
 
 
 ### Public Types ###
@@ -89,9 +90,13 @@ def ingest_directory(src_dir, *, encoder=None):
         dtype=settings.colqwen_dtype,
     )
 
+    files = sorted(_iter_supported_files(src_dir))
+    print(f"  {len(files)} fichier(s) — encodage ColQwen2 sur "
+          f"'{settings.colqwen_device}' (dtype {settings.colqwen_dtype})")
+
     n_pages = 0
     with _store.open_stores(settings) as (vec_store, meta_store):
-        for file in sorted(_iter_supported_files(src_dir)):
+        for file in tqdm(files, desc="ColQwen2 encode", unit="file"):
             n_pages += _ingest_one_file(
                 file, encoder, vec_store, meta_store, settings,
             )
