@@ -19,7 +19,6 @@ from pathlib import Path
 from doqment import llm as _llm
 from doqment import phase2_store as _store
 from doqment.settings import load_settings
-from tqdm import tqdm
 
 
 ### Public Types ###
@@ -89,6 +88,8 @@ def ingest_directory(src_dir, *, encoder=None):
         device=settings.colqwen_device,
         dtype=settings.colqwen_dtype,
     )
+
+    from tqdm import tqdm
 
     files = sorted(_iter_supported_files(src_dir))
     print(f"  {len(files)} fichier(s) — encodage ColQwen2 sur "
@@ -340,6 +341,7 @@ def _generate_answer(question, sources, settings):
         model=settings.ollama_vision_model,
         host=settings.ollama_host,
         keep_alive=settings.ollama_keep_alive,
+        num_ctx=settings.ollama_num_ctx,
     )
 
     cited = [

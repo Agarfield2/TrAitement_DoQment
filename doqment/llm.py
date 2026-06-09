@@ -61,7 +61,7 @@ class VLMAnswer:
     raw: str
 
 
-def generate_vision(prompt, images, *, model, host, keep_alive="5m"):
+def generate_vision(prompt, images, *, model, host, keep_alive="5m", num_ctx=8192):
     """
     Calls Ollama vision generation with images attached.
 
@@ -102,7 +102,15 @@ def generate_vision(prompt, images, *, model, host, keep_alive="5m"):
         ],
         keep_alive=keep_alive,
         format="json",
-        options={"temperature": 0.0},
+        options={
+            "temperature": 0.0,
+            # Fenêtre assez large pour contenir plusieurs images sans troncature
+            # (la troncature corrompt le template et fait boucler le modèle).
+            "num_ctx": num_ctx,
+            # Garde-fous contre les boucles de répétition (<|im_start|>, addCriterion…).
+            "repeat_penalty": 1.1,
+            "num_predict": 1024,
+        },
     )
 
     raw = response["message"]["content"].strip()

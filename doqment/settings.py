@@ -30,6 +30,7 @@ class Settings:
         ollama_text_model: Model tag used for Pipeline 1 text answers.
         ollama_vision_model: Model tag used for Pipeline 2 multimodal answers.
         ollama_keep_alive: How long Ollama keeps the model warm in RAM/VRAM.
+        ollama_num_ctx: Ollama context window for the VLM (token budget).
         phase1_index_dir: Directory holding FAISS index + metadata (Pipeline 1).
         phase2_qdrant_dir: Directory holding the local Qdrant database (Pipeline 2).
         phase2_metadata_db: SQLite file holding Pipeline 2 page metadata.
@@ -48,6 +49,10 @@ class Settings:
     ollama_text_model: str = os.environ.get("DOQMENT_OLLAMA_TEXT_MODEL", "mistral:7b-instruct")
     ollama_vision_model: str = os.environ.get("DOQMENT_OLLAMA_VISION_MODEL", "qwen2.5vl:7b")
     ollama_keep_alive: str = os.environ.get("DOQMENT_OLLAMA_KEEP_ALIVE", "5m")
+    # Fenêtre de contexte Ollama pour le VLM. Plusieurs images de pages
+    # consomment beaucoup de tokens visuels ; une fenêtre trop petite tronque
+    # l'entrée et fait dégénérer Qwen (boucle de tokens <|im_start|>).
+    ollama_num_ctx: int = int(os.environ.get("DOQMENT_OLLAMA_NUM_CTX", "8192"))
 
     phase1_index_dir: Path = _DATA / "processed"
     phase2_qdrant_dir: Path = _DATA / "qdrant"
