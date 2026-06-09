@@ -7,8 +7,9 @@ Three entry points :
 - `ask_document(file, question)` answers a question about ONE document.
 - `ask_database(question)`       answers a question across the whole index.
 
-The heavy lifting (OCR, chunking, embeddings, FAISS) lives in the
-canonical `ingestion.py` file. We never modify that file — we wrap it.
+The data structures, SROIE annotation parsing, chunking, embeddings and
+FAISS index live in `ingestion.py`. Image OCR (when no annotation exists)
+lives in `doqment/ocr.py` (docTR by default, Tesseract optional).
 """
 
 import logging
@@ -88,9 +89,8 @@ def ingest_directory(task1, task2=None, *, max_docs=None, use_ocr=False,
 
     Files lacking an annotation are either OCR'd (`use_ocr=True`) or
     silently skipped. The OCR engine is docTR by default (see
-    Settings.ocr_engine) ; pass `ocr_engine="tesseract"` to switch. We
-    never trigger the canonical PaddleOCR path because it's broken
-    (see ingestion.py:82-99).
+    Settings.ocr_engine) ; pass `ocr_engine="tesseract"` to switch. OCR
+    is delegated to `doqment/ocr.py`.
 
     Args:
         task1 (str | Path): Root folder, scanned recursively.

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import os
 import pickle
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -9,7 +7,6 @@ from typing import Optional
 
 import numpy as np
 from PIL import Image
-from tqdm import tqdm
 
 
 # Structures de données
@@ -29,7 +26,7 @@ class BoundingBox:
     @property
     def xmax(self) -> float: return max(self.x1, self.x2, self.x3, self.x4)
     @property
-    def ymax(self) -> float: return max(self.x1, self.y2, self.y3, self.y4)
+    def ymax(self) -> float: return max(self.y1, self.y2, self.y3, self.y4)
 
 
 @dataclass
@@ -63,66 +60,23 @@ def rasterize_pdf(pdf_path: str | Path, dpi: int = 300) -> list[Image.Image]:
         raise ImportError("Installer pdf2image : pip install pdf2image")
 
 
-
 def load_image(image_path: str | Path) -> Image.Image:
     img = Image.open(str(image_path)).convert("RGB")
     return img
 
 
-# OCR
+# Lecture des annotations SROIE
+#
+# NB : l'OCR réel (reconnaissance de texte sur image) ne vit PAS ici. Il est
+# fourni par `doqment/ocr.py` (docTR par défaut, Tesseract en option), qui
+# produit directement des `TextLine`. La classe ci-dessous se limite à lire
+# la ground-truth ICDAR fournie avec le corpus SROIE.
 
 class OCREngine:
-    """Wrapper PaddleOCR avec fallback sur annotations SROIE (ground-truth)."""
+    """Lecteur d'annotations SROIE (ground-truth ICDAR) → liste de TextLine.
 
-    def __init__(self, use_gpu: bool = False, lang: str = "en"):
-        self._ocr = None
-        self._use_gpu = use_gpu
-        self._lang = lang
-
-    def _load(self):
-        if self._model is None:
-            try:
-                from sentence_transformers import SentenceTransformer
-                import torch
-
-                self._model = SentenceTransformer(
-                    self._model_name,
-                    device="cuda" if torch.cuda.is_available() else "cpu"
-                )
-
-            except Exception as e:
-                raise RuntimeError(
-                    f"Impossible de charger le modèle SentenceTransformer "
-                    f"'{self._model_name}'.\n"
-                    f"Vérifie la connexion internet ou télécharge le modèle manuellement.\n"
-                    f"Erreur originale : {e}"
-                )
-
-    def run(self, image: Image.Image) -> list[TextLine]:
-        self._load()
-        import numpy as np
-
-        result = self._ocr.ocr(np.array(image), cls=True)
-        lines: list[TextLine] = []
-
-        if result and result[0]:
-            for item in result[0]:
-                pts, (text, conf) = item
-
-                bbox = BoundingBox(
-                    x1=pts[0][0], y1=pts[0][1],
-                    x2=pts[1][0], y2=pts[1][1],
-                    x3=pts[2][0], y3=pts[2][1],
-                    x4=pts[3][0], y4=pts[3][1],
-                )
-
-                lines.append(TextLine(
-                    text=text,
-                    bbox=bbox,
-                    confidence=float(conf)
-                ))
-
-        return lines
+    Pour l'OCR d'images sans annotation, utiliser `doqment/ocr.py`.
+    """
 
     @staticmethod
     def from_sroie_annotation(annotation_path: str | Path) -> list[TextLine]:
@@ -371,197 +325,3 @@ class FAISSIndex:
         print(f"Index chargé : {obj._index.ntotal} passages depuis {directory}")
 
         return obj
-
-
-# Pipeline d'ingestion
-
-class IngestionPipeline:
-
-    def __init__(
-        self,
-        index_dir: str = "data/processed",
-        use_paddle_ocr: bool = False,
-        use_gpu: bool = False,
-        embed_model: Optional[str] = None,
-    ):
-        self.index_dir = Path(index_dir)
-        self.use_paddle_ocr = use_paddle_ocr
-        self.ocr_engine = OCREngine(use_gpu=use_gpu) if use_paddle_ocr else None
-        self.embed_model = EmbeddingModel(embed_model)
-        self.faiss_index = FAISSIndex()
-        self._all_passages: list[Passage] = []
-
-    def process_image(
-        self,
-        image_path: str | Path,
-        annotation_path: Optional[str | Path] = None,
-        entities_path: Optional[str | Path] = None,
-    ) -> list[Passage]:
-
-        image_path = Path(image_path)
-
-        if annotation_path and Path(annotation_path).exists() and not self.use_paddle_ocr:
-            lines = OCREngine.from_sroie_annotation(annotation_path)
-
-        elif self.use_paddle_ocr:
-            img = load_image(image_path)
-            lines = self.ocr_engine.run(img)
-
-        else:
-            print(f"  [SKIP] {image_path.name} : pas d'annotation et OCR désactivé")
-            return []
-
-        entities = None
-
-        if entities_path and Path(entities_path).exists():
-            with open(entities_path, encoding="utf-8", errors="ignore") as f:
-                try:
-                    entities = json.load(f)
-                except json.JSONDecodeError:
-                    pass
-
-        passages = group_lines_into_passages(
-            lines=lines,
-            source_file=str(image_path),
-            entities=entities,
-        )
-
-        return passages
-
-    def ingest_directory(
-        self,
-        task1_dir: str | Path,
-        task2_dir: Optional[str | Path] = None,
-        image_extensions: tuple = (".jpg", ".jpeg", ".png"),
-        max_docs: Optional[int] = None,
-    ):
-
-        task1_dir = Path(task1_dir)
-        task2_dir = Path(task2_dir) if task2_dir else None
-
-        image_files = sorted([
-            f for f in task1_dir.iterdir()
-            if f.suffix.lower() in image_extensions
-        ])
-
-        if max_docs:
-            image_files = image_files[:max_docs]
-
-        print(f"\n── Ingestion : {len(image_files)} documents ──────────────────")
-
-        all_texts: list[str] = []
-        all_passages: list[Passage] = []
-
-        for img_path in tqdm(image_files, desc="OCR + passages"):
-            stem = img_path.stem
-
-            ann_path = task1_dir / f"{stem}.txt"
-
-            # SROIE-Dataset_v2 : images dans img/, annotation box/ en
-            # dossier frere. Si elle n'est pas a cote de l'image, la
-            # chercher dans ../box/.
-            if not ann_path.exists():
-                sibling = task1_dir.parent / "box" / f"{stem}.txt"
-                if sibling.exists():
-                    ann_path = sibling
-
-            ent_path = None
-            if task2_dir:
-                candidate = task2_dir / f"{stem}.txt"
-                if candidate.exists():
-                    ent_path = candidate
-
-            passages = self.process_image(
-                image_path=img_path,
-                annotation_path=ann_path,
-                entities_path=ent_path,
-            )
-
-            all_passages.extend(passages)
-            all_texts.extend(p.text for p in passages)
-
-        print(f"\n── Embeddings : {len(all_passages)} passages ──────────────────")
-
-        if not all_passages:
-            print("Aucun passage trouvé. Vérifier les chemins et annotations.")
-            return
-
-        vectors = self.embed_model.encode(all_texts, show_progress=True)
-
-        print(f"\n── Indexation FAISS ──────────────────────────────────────────")
-
-        self.faiss_index.add(vectors, all_passages)
-        self._all_passages.extend(all_passages)
-
-        self.faiss_index.save(self.index_dir)
-
-        print(f"\n✓ Ingestion terminée : {len(all_passages)} passages indexés")
-
-    def stats(self) -> dict:
-
-        if not self._all_passages:
-            return {}
-
-        texts = [p.text for p in self._all_passages]
-        lengths = [len(t) for t in texts]
-        docs = len({p.source_file for p in self._all_passages})
-
-        return {
-            "total_passages": len(self._all_passages),
-            "total_documents": docs,
-            "avg_passage_len": float(np.mean(lengths)),
-            "min_passage_len": int(min(lengths)),
-            "max_passage_len": int(max(lengths)),
-            "avg_confidence": float(np.mean([p.avg_confidence for p in self._all_passages])),
-        }
-
-
-# Script standalone
-
-if __name__ == "__main__":
-
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Pipeline d'ingestion Phase 1")
-
-    parser.add_argument(
-        "--task1",
-        default="data/SROIE-Dataset_v2/train/img"
-    )
-
-    parser.add_argument(
-        "--task2",
-        default="data/SROIE-Dataset_v2/train/entities"
-    )
-
-    parser.add_argument(
-        "--index-dir",
-        default="data/processed"
-    )
-
-    parser.add_argument(
-        "--paddle",
-        action="store_true",
-        help="Utiliser PaddleOCR au lieu des annotations ground-truth"
-    )
-
-    parser.add_argument(
-        "--max-docs",
-        type=int,
-        default=None
-    )
-
-    args = parser.parse_args()
-
-    pipeline = IngestionPipeline(
-        index_dir=args.index_dir,
-        use_paddle_ocr=args.paddle,
-    )
-
-    pipeline.ingest_directory(
-        task1_dir=args.task1,
-        task2_dir=args.task2,
-        max_docs=args.max_docs,
-    )
-
-    print("\nStatistiques :", pipeline.stats())

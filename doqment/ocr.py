@@ -9,11 +9,10 @@ Two engines are exposed through ocr_image():
 The engine defaults to Settings.ocr_engine ("doctr", overridable via the
 DOQMENT_OCR_ENGINE environment variable).
 
-The canonical OCREngine class in ingestion.py has a known bug (its
-_load() method references a non-existent self._model attribute). We
-can't patch ingestion.py — it is a canonical artefact. Instead, we
-expose a Tesseract wrapper that produces ingestion.TextLine instances
-directly consumable by ingestion.group_lines_into_passages().
+This module is the project's image-OCR layer. `ingestion.OCREngine` only
+reads SROIE ground-truth annotations ; the actual text recognition on raw
+images lives here and produces `ingestion.TextLine` instances directly
+consumable by `ingestion.group_lines_into_passages()`.
 
 Pre-processing pipeline (applied in order when enabled):
   1. enhance_contrast  — cv2.convertScaleAbs (alpha/beta), only if the image

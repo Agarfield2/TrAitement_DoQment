@@ -205,8 +205,7 @@ def _faiss_index_init(self, dim):
 def test_ingest_directory_uses_annotations_when_present(tmp_path, monkeypatch):
     """
     With a SROIE-style annotation next to the image, ingest_directory
-    must use the canonical annotation parser — never trigger Tesseract
-    nor the broken canonical OCREngine.
+    must use the annotation parser — never trigger image OCR.
     """
 
     import doqment.phase1 as phase1_mod
@@ -256,7 +255,7 @@ def test_ingest_directory_uses_annotations_when_present(tmp_path, monkeypatch):
 def test_ingest_directory_skips_unannotated_by_default(tmp_path, monkeypatch):
     """
     Without --ocr, files lacking an annotation must be silently
-    skipped (the broken canonical PaddleOCR path is never engaged).
+    skipped (no image OCR is engaged).
     """
 
     import doqment.phase1 as phase1_mod
@@ -297,8 +296,7 @@ def test_ingest_directory_skips_unannotated_by_default(tmp_path, monkeypatch):
 
 def test_ingest_directory_uses_ocr_when_requested(tmp_path, monkeypatch):
     """
-    With --ocr on, unannotated files go through our OCR wrapper
-    (never the broken canonical OCREngine).
+    With --ocr on, unannotated files go through doqment/ocr.py.
     """
 
     import doqment.phase1 as phase1_mod
