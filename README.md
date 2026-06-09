@@ -247,7 +247,7 @@ export DOQMENT_COLQWEN_DTYPE=bfloat16
 
 ```
 TrAitement-DoQment/
-├── ingestion.py               ← canonique coéquipier 1 (intouché)
+├── ingestion.py               ← nettoyé : structures, annotations SROIE, embeddings, FAISS
 ├── pipeline1.py               ← canonique coéquipier 1 (intouché)
 ├── pipeline_rag2.py           ← canonique coéquipier 2 (intouché)
 ├── pdf_ocr.py                 ← canonique coéquipier 2 (intouché)
@@ -295,8 +295,6 @@ TrAitement-DoQment/
 
 **`Could not load library with AVX2 support` (FAISS)** — Le fallback générique s'active. Fonctionnel, performance légèrement plus basse.
 
-**`AttributeError: 'OCREngine' object has no attribute '_model'`** — Bug du fichier canonique `ingestion.py:82-99`. Le mode `doc` Pipeline 1 contourne automatiquement en passant par `doqment/ocr.py` (docTR par défaut, ou Tesseract). Si vous voyez l'erreur, c'est que vous tournez une version antérieure — `pytest` doit afficher 61 passed.
-
 **`ResponseError: model requires more system memory (12.5 GiB) than is available (...)`** — Qwen2.5-VL 7B requiert ~12,5 Go de RAM en CPU-only (~5 Go en GPU CUDA). Libérer de la RAM (fermer le navigateur, IDE, etc.) ou exécuter sur une machine équipée. Le projet est figé sur ce modèle ; ne pas le remplacer.
 
 **`Found no NVIDIA driver on your system`** sur Pipeline 2 — ColQwen2 cherche un GPU CUDA. Sur machine CPU-only :
@@ -308,13 +306,15 @@ L'encodage est ~50× plus lent qu'avec GPU (compter ~30 s par page) — réalist
 
 ---
 
-## Quatre fichiers canoniques cohabitent
+## Fichiers canoniques conservés
 
-Les coéquipiers ont livré du code Python qu'on conserve **byte-identique aux originaux** :
+`ingestion.py` a été **nettoyé et corrigé** pour la version finale : retrait de la machinerie OCR fantôme (`OCREngine._load/run`, qui chargeait un SentenceTransformer sous un nom d'attribut inexistant), suppression de la classe morte `IngestionPipeline` (jamais importée, remplacée par `doqment/phase1.py`) et de son bloc `__main__` (remplacé par `scripts/phase1.py`), et correction de `BoundingBox.ymax`. Il ne conserve que ce qui est réellement utilisé : structures de données, lecture des annotations SROIE, `EmbeddingModel` et `FAISSIndex`. L'OCR d'images vit désormais uniquement dans `doqment/ocr.py`.
+
+Les fichiers suivants restent **byte-identiques aux originaux** des coéquipiers :
 
 | Fichier | Apport | Qui s'en sert |
 |---|---|---|
-| `ingestion.py` + `pipeline1.py` | Indexation canonique SROIE (coéquipier 1) | `doqment/phase1.py` |
+| `pipeline1.py` | Démo d'indexation FAISS autonome (coéquipier 1) | standalone |
 | `pipeline_rag2.py` | RAG complet avec REPL (coéquipier 2) | usage standalone |
 | `pdf_ocr.py` | OCR Tesseract autonome (coéquipier 2) | extraction texte hors RAG |
 
@@ -325,7 +325,5 @@ Les coéquipiers ont livré du code Python qu'on conserve **byte-identique aux o
 ## Limites assumées
 
 - **L'index FAISS HNSW** (Pipeline 1) ne supporte pas la suppression individuelle — il faut réindexer pour retirer un document.
-- **`ingestion.py:32`** : `BoundingBox.ymax` contient un bug (`max(self.x1, self.y2, self.y3, self.y4)` au lieu de `self.y1`). Contourné dans nos tests.
-- **`ingestion.py:82-99`** : `OCREngine._load()` référence `self._model` qui n'existe pas. Contourné par `doqment/ocr.py` (docTR par défaut, ou Tesseract).
 - **Pipeline 2 demande de la RAM** — Qwen2.5-VL 7B en CPU-only consomme ~12,5 Go (≈ 5 Go avec GPU CUDA). ColQwen2 ajoute ~6 Go. Sur machine ≤ 16 Go libre, fermer les autres applications avant de lancer `db`. Ce dimensionnement est assumé.
 - **La Loi 25** — l'exécution locale ne couvre que l'aspect *technique*. Le consentement, le registre et le RPRP restent à instrumenter au niveau organisationnel.
