@@ -173,8 +173,10 @@ def preprocess(img: Image.Image, enhance="auto",
 def ocr_tesseract_lines(img: Image.Image, lang: str,
                         enhance="auto",
                         alpha: float = 1.5,
-                        beta: int = 0) -> list:
-    processed = preprocess(img, enhance=enhance, alpha=alpha, beta=beta)
+                        beta: int = 0,
+                        use_filters: bool = True) -> list:
+    processed = preprocess(img, enhance=enhance, alpha=alpha, beta=beta) \
+                if use_filters else img.convert("L")
     data = pytesseract.image_to_data(
         processed,
         lang=lang,
@@ -424,7 +426,8 @@ def run_engine(engine: str, img: Image.Image, args,
         alph  = alpha   if alpha   is not None else args.alpha
         bet   = beta    if beta    is not None else args.beta
         return ocr_tesseract_lines(img, args.lang,
-                                   enhance=enh, alpha=alph, beta=bet)
+                                   enhance=enh, alpha=alph, beta=bet,
+                                   use_filters=args.filters)
     elif engine == "doctr":
         return ocr_doctr_lines(img)
     else:
@@ -461,6 +464,11 @@ def main():
                         help="Contrast multiplier for Tesseract (default 1.5)")
     parser.add_argument("--beta",     type=int,   default=0,
                         help="Brightness offset for Tesseract (default 0)")
+    parser.add_argument("--no-filters", dest="filters", action="store_false",
+                        help="Disable Tesseract image preprocessing (contrast -> "
+                             "threshold -> dilate). Enabled by default. "
+                             "No effect on docTR.")
+    parser.set_defaults(filters=True)
     parser.add_argument("--tesseract-grid", action="store_true",
                         help="Grid search over Tesseract preprocessing params "
                              "(enhance x alpha x beta). Ignores --enhance/--alpha/--beta.")
@@ -507,7 +515,8 @@ def main():
                 try:
                     lines = ocr_tesseract_lines(img, args.lang,
                                                 enhance=enh_mode,
-                                                alpha=alph, beta=bet)
+                                                alpha=alph, beta=bet,
+                                                use_filters=args.filters)
                 except Exception as exc:
                     print(f"  [{label}] ERROR - {exc}")
                     continue

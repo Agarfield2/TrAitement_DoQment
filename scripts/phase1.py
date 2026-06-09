@@ -53,6 +53,11 @@ def ingest(
         help="OCR engine: 'doctr' (default) or 'tesseract'. "
              "When omitted, uses Settings.ocr_engine.",
     ),
+    use_filters: bool = typer.Option(
+        True, "--filters/--no-filters",
+        help="Apply OCR image preprocessing (contrast → threshold → dilate). "
+             "Enabled by default. Affects Tesseract only (docTR ignores it).",
+    ),
 ):
     """
     Builds the FAISS index from a folder of documents.
@@ -60,7 +65,7 @@ def ingest(
 
     stats = phase1.ingest_directory(
         task1, task2, max_docs=max_docs, use_ocr=use_ocr,
-        ocr_engine=ocr_engine,
+        ocr_engine=ocr_engine, use_filters=use_filters,
     )
     console.print(f"[bold green]✓[/] Indexed {stats['total_passages']} passages "
                   f"from {stats['total_documents']} documents.")
@@ -74,6 +79,10 @@ def doc(
         None, help="Optional SROIE annotation .txt file (skips OCR).",
     ),
     top_k: int = typer.Option(5, help="Passages kept for the prompt."),
+    use_filters: bool = typer.Option(
+        True, "--filters/--no-filters",
+        help="Apply OCR image preprocessing (Tesseract only). Enabled by default.",
+    ),
 ):
     """
     Answers a question about ONE document, in memory, no database.
@@ -81,6 +90,7 @@ def doc(
 
     answer = phase1.ask_document(
         file=file, question=question, annotation=annotation, top_k=top_k,
+        use_filters=use_filters,
     )
     _print(question, answer)
 

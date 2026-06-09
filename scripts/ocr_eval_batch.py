@@ -158,9 +158,14 @@ def preprocess(img: Image.Image, enhance="auto",
 # ── OCR Tesseract (Phase 1) ───────────────────────────────────────────────────
 
 def run_tesseract(img: Image.Image, lang: str, enhance="auto",
-                  alpha: float = 1.5, beta: int = 0) -> str:
-    """Retourne le texte OCR Tesseract sous forme de chaîne."""
-    processed = preprocess(img, enhance=enhance, alpha=alpha, beta=beta)
+                  alpha: float = 1.5, beta: int = 0, use_filters: bool = True) -> str:
+    """Retourne le texte OCR Tesseract sous forme de chaîne.
+
+    use_filters=True applique le prétraitement (contraste → seuillage →
+    dilatation). use_filters=False envoie l'image brute en niveaux de gris.
+    """
+    processed = preprocess(img, enhance=enhance, alpha=alpha, beta=beta) \
+                if use_filters else img.convert("L")
     try:
         available = pytesseract.get_languages()
         parts = [p for p in lang.split("+") if p in available]
@@ -214,7 +219,8 @@ def run_ocr_text(img: Image.Image, args) -> str:
     if args.ocr_engine == "tesseract":
         enhance_mode = {"auto": "auto", "on": True, "off": False}[args.enhance]
         return run_tesseract(img, args.lang, enhance=enhance_mode,
-                             alpha=args.alpha, beta=args.beta)
+                             alpha=args.alpha, beta=args.beta,
+                             use_filters=args.filters)
     # docTR
     from doqment.ocr import ocr_image
     lines = ocr_image(img, engine="doctr")
@@ -224,7 +230,7 @@ def run_ocr_text(img: Image.Image, args) -> str:
 def ocr_engine_label(args) -> str:
     """Libelle lisible du moteur OCR pour le resume de configuration."""
     if args.ocr_engine == "tesseract":
-        return f"Tesseract ({args.lang})"
+        return f"Tesseract ({args.lang}, {'filtres' if args.filters else 'sans filtres'})"
     return "docTR"
 
 
@@ -1027,6 +1033,14 @@ def print_stats_docvqa(results: list, pipeline: str, threshold: float) -> dict:
     }
 
 
+def _docvqa_key(rec) -> tuple:
+    """Cle stable d'une question pour la reprise (questionId, sinon fichier+question)."""
+    qid = rec.get("questionId")
+    if qid is not None:
+        return (rec["task"], qid)
+    return (rec["task"], rec.get("file"), rec.get("question"))
+
+
 def run_docvqa(args):
     """Boucle d'evaluation DocVQA (appelee par main quand --dataset-type docvqa)."""
     dataset_dir = Path(args.dataset)
@@ -1051,65 +1065,107 @@ def run_docvqa(args):
         ocr_label = "aucun (image directe)"
         model_label = args.vision_model
 
+    # ── Checkpoint reprenable ────────────────────────────────────────────────
+    # Chaque resultat est ecrit ligne par ligne (JSONL) au fil de l'eau, ce qui
+    # permet de reprendre apres une coupure SSH / OOM / Ctrl-C sans tout refaire.
+    if args.out:
+        ckpt_path = Path(str(args.out) + ".jsonl")
+    else:
+        ckpt_path = Path("data/eval") / (
+            f"_ckpt_docvqa_{'+'.join(tasks)}_{split}_{pipeline}.jsonl")
+    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+
+    results, done = [], set()
+    if args.resume and ckpt_path.exists():
+        with open(ckpt_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue          # ligne tronquee par une coupure : on l'ignore
+                results.append(rec)
+                done.add(_docvqa_key(rec))
+
+    pending = [it for it in items if _docvqa_key(it) not in done]
+    n_done = len(items) - len(pending)
+    ckpt_mode = "a" if (args.resume and ckpt_path.exists()) else "w"
+    if ckpt_mode == "w":
+        results = []              # --no-resume : on repart de zero
+
     print(f"\n  {len(items)} question(s)")
     print(f"  dataset      = DocVQA  (taches={'+'.join(tasks)})")
     print(f"  pipeline     = {pipeline.upper()}")
     print(f"  OCR          = {ocr_label}")
     print(f"  modele       = {model_label}")
     print(f"  split        = {split}")
+    print(f"  checkpoint   = {ckpt_path}")
+    if n_done and ckpt_mode == "a":
+        print(f"  reprise      = {n_done} deja fait(s), {len(pending)} restant(s)")
 
-    results = []
-    for i, it in enumerate(items, 1):
-        print(f"\n[{i}/{len(items)}] [{it['task']}] {it['image_path'].name}")
-        print(f"  Q: {it['question']}")
+    ckpt_f = open(ckpt_path, ckpt_mode, encoding="utf-8")
+    try:
+        for j, it in enumerate(pending, 1):
+            i = n_done + j
+            print(f"\n[{i}/{len(items)}] [{it['task']}] {it['image_path'].name}")
+            print(f"  Q: {it['question']}")
 
-        try:
-            if pipeline == "phase1":
-                if args.use_provided_ocr and it["ocr_path"]:
-                    ocr_text = read_docvqa_ocr(it["ocr_path"])
-                    src = "ocr_fourni"
+            try:
+                if pipeline == "phase1":
+                    if args.use_provided_ocr and it["ocr_path"]:
+                        ocr_text = read_docvqa_ocr(it["ocr_path"])
+                        src = "ocr_fourni"
+                    else:
+                        img = load_image(it["image_path"], args.dpi)
+                        ocr_text = run_ocr_text(img, args)
+                        src = args.ocr_engine
+                    prediction = answer_phase1(args.ollama_host, args.ollama_model,
+                                               ocr_text, it["question"])
                 else:
                     img = load_image(it["image_path"], args.dpi)
-                    ocr_text = run_ocr_text(img, args)
-                    src = args.ocr_engine
-                prediction = answer_phase1(args.ollama_host, args.ollama_model,
-                                           ocr_text, it["question"])
+                    prediction = answer_phase2(args.ollama_host, args.vision_model,
+                                               img, it["question"])
+                    src = "none (vision directe)"
+            except Exception as exc:
+                print(f"  [WARN] item ignore : {exc}")
+                continue
+
+            nls = anls_nls(prediction, it["answers"])
+            auto = verdict_from_anls(nls, args.anls_threshold)
+            if auto != "CORRECT":
+                judged = judge_docvqa(args.ollama_host, args.ollama_model,
+                                      it["question"], it["answers"], prediction)
             else:
-                img = load_image(it["image_path"], args.dpi)
-                prediction = answer_phase2(args.ollama_host, args.vision_model,
-                                           img, it["question"])
-                src = "none (vision directe)"
-        except Exception as exc:
-            print(f"  [WARN] item ignore : {exc}")
-            continue
+                judged = {"verdict": "CORRECT", "reason": ""}
+            verdict = merge_verdicts(auto, judged.get("verdict"))
 
-        nls = anls_nls(prediction, it["answers"])
-        auto = verdict_from_anls(nls, args.anls_threshold)
-        if auto != "CORRECT":
-            judged = judge_docvqa(args.ollama_host, args.ollama_model,
-                                  it["question"], it["answers"], prediction)
-        else:
-            judged = {"verdict": "CORRECT", "reason": ""}
-        verdict = merge_verdicts(auto, judged.get("verdict"))
+            print(f"  → reponse={prediction!r}  | ref={it['answers']}")
+            print(f"    NLS={nls:.3f}  auto={color(auto, auto)}  "
+                  f"juge={color(judged['verdict'], judged['verdict'])}  "
+                  f"final={color(verdict, verdict)}")
 
-        print(f"  → reponse={prediction!r}  | ref={it['answers']}")
-        print(f"    NLS={nls:.3f}  auto={color(auto, auto)}  "
-              f"juge={color(judged['verdict'], judged['verdict'])}  "
-              f"final={color(verdict, verdict)}")
-
-        results.append({
-            "task": it["task"],
-            "questionId": it["questionId"],
-            "file": it["image_path"].name,
-            "question": it["question"],
-            "answers": it["answers"],
-            "prediction": prediction,
-            "ocr_source": src,
-            "nls": nls,
-            "auto_verdict": auto,
-            "llm_verdict": judged.get("verdict"),
-            "verdict": verdict,
-        })
+            rec = {
+                "task": it["task"],
+                "questionId": it["questionId"],
+                "file": it["image_path"].name,
+                "question": it["question"],
+                "answers": it["answers"],
+                "prediction": prediction,
+                "ocr_source": src,
+                "nls": nls,
+                "auto_verdict": auto,
+                "llm_verdict": judged.get("verdict"),
+                "verdict": verdict,
+            }
+            results.append(rec)
+            # Ecriture immediate + flush + fsync : durable meme en cas de kill.
+            ckpt_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            ckpt_f.flush()
+            os.fsync(ckpt_f.fileno())
+    finally:
+        ckpt_f.close()
 
     if results:
         summary = print_stats_docvqa(results, pipeline, args.anls_threshold)
@@ -1120,6 +1176,7 @@ def run_docvqa(args):
                 json.dump({"summary": summary, "results": results},
                           f, ensure_ascii=False, indent=2)
             print(f"\n  Resultats sauvegardes → {out_path}")
+        print(f"  Checkpoint (reprenable)  → {ckpt_path}")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -1166,6 +1223,13 @@ def main():
                              "au lieu de lancer Tesseract")
     parser.add_argument("--anls-threshold", type=float, default=0.5,
                         help="Seuil ANLS DocVQA (defaut: 0.5)")
+    parser.add_argument("--no-resume", dest="resume", action="store_false",
+                        help="DocVQA : ignorer le checkpoint et repartir de zero")
+    parser.add_argument("--no-filters", dest="filters", action="store_false",
+                        help="Desactiver le pretraitement d'image (filtres : "
+                             "contraste -> seuillage -> dilatation) avant OCR. "
+                             "N'affecte que --ocr-engine tesseract (docTR les ignore).")
+    parser.set_defaults(resume=True, filters=True)
     parser.add_argument("--ocr-engine", default=None,
                         choices=["doctr", "tesseract"],
                         help="Moteur OCR Phase 1 (defaut: celui du projet, "

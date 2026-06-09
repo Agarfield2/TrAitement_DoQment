@@ -68,7 +68,7 @@ _REFUSAL = "I do not have this information in the provided documents."
 ### Ingestion ###
 
 def ingest_directory(task1, task2=None, *, max_docs=None, use_ocr=False,
-                     ocr_engine=None,
+                     ocr_engine=None, use_filters=True,
                      image_extensions=(".jpg", ".jpeg", ".png")):
     """
     Builds the FAISS index from a folder of SROIE-style documents.
@@ -148,7 +148,7 @@ def ingest_directory(task1, task2=None, *, max_docs=None, use_ocr=False,
             n_annot += 1
         elif use_ocr:
             lines = _ocr.ocr_image(_ing.load_image(img_path),
-                                   engine=ocr_engine)
+                                   engine=ocr_engine, preprocess=use_filters)
             n_ocr += 1
         else:
             n_skipped += 1
@@ -206,7 +206,7 @@ def ingest_directory(task1, task2=None, *, max_docs=None, use_ocr=False,
 ### Single-document inference ###
 
 def ask_document(file, question, *, annotation=None, top_k=5,
-                 embedder=None, llm_fn=None):
+                 use_filters=True, embedder=None, llm_fn=None):
     """
     Answers a question about ONE document, fully in memory.
 
@@ -219,6 +219,7 @@ def ask_document(file, question, *, annotation=None, top_k=5,
         annotation (str | Path, optional): SROIE annotation .txt.
             When supplied, OCR is skipped.
         top_k (int): Number of passages kept for the prompt.
+        use_filters (bool): Apply OCR image preprocessing (Tesseract only).
         embedder: Pre-loaded ingestion.EmbeddingModel (cache friendly).
         llm_fn: Callable (prompt) → str, injectable for tests.
 
@@ -229,7 +230,7 @@ def ask_document(file, question, *, annotation=None, top_k=5,
     file = Path(file)
     settings = load_settings()
 
-    lines = _extract_lines(file, annotation)
+    lines = _extract_lines(file, annotation, use_filters=use_filters)
     if not lines:
         return Answer(text=_REFUSAL, sources=[])
 
@@ -433,13 +434,14 @@ def _passage_to_hit(passage, score):
     }
 
 
-def _extract_lines(file, annotation):
+def _extract_lines(file, annotation, *, use_filters=True):
     """
     Extracts text lines from a document, via annotation or OCR.
 
     Args:
         file (Path): The document.
         annotation (str | Path | None): Optional SROIE annotation.
+        use_filters (bool): Apply OCR image preprocessing (Tesseract only).
 
     Returns:
         list: ingestion.TextLine instances.
@@ -455,7 +457,7 @@ def _extract_lines(file, annotation):
 
     lines = []
     for img in images:
-        lines.extend(_ocr.ocr_image(img))
+        lines.extend(_ocr.ocr_image(img, preprocess=use_filters))
     return lines
 
 
